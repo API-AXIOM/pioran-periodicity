@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pioran-periodicity"
+version = "0.1.2"
+description = "Bayesian periodicity detection in irregularly sampled AGN light curves with Gaussian processes (Pioran.jl via pioranpy) and nested sampling"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Daniela Huppenkothen" }]
+dependencies = [
+    "numpy",
+    "scipy",
+    "pandas",
+    "ultranest",
+    "pioranpy",
+]
+
+[project.urls]
+Homepage = "https://github.com/dhuppenkothen/pioran-periodicity"
+Repository = "https://github.com/dhuppenkothen/pioran-periodicity"
+Changelog = "https://github.com/dhuppenkothen/pioran-periodicity/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+simulation = ["stingray"]
+test = ["pytest"]
+dev = ["black", "flake8", "isort", "pre-commit"]
+docs = ["mkdocs-material", "mkdocstrings[python]"]
+
+[tool.setuptools.packages.find]
+include = ["pioran_periodicity*"]
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: genuine (small) ultranest run",
+]

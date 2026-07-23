@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install black flake8 isort
+      - run: black --check .
+      - run: isort --check-only .
+      - run: flake8 .
+
+  test:
+    runs-on: ubuntu-latest
+    # The full test suite needs pioranpy, which needs Julia + Pioran.jl.
+    # Julia install + precompilation is slow (several minutes) and network-
+    # dependent, so this job is separate from `lint` and allowed to be slow;
+    # it is not a merge-blocking gate until the Julia setup step below is
+    # filled in for this project's pinned Pioran.jl version.
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1.10"
+      # pioranpy's juliapkg install pulls in Pioran.jl on first import;
+      # this can be pre-warmed here once the project pins a Pioran.jl
+      # version/registry to install ahead of time.
+      - run: pip install -e ".[simulation,test]"
+      - run: pytest tests/
