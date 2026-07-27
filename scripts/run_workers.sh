@@ -30,6 +30,7 @@ if [ $# -ge 3 ]; then
             --n-sims 1080 --stride "$NWORKERS" --worker "$WORKER" \
             --filter-value -1.0 \
             --enforce-leakage-margin false \
+            --models drw \
             >> "$LOG" 2>&1
         if tail -50 "$LOG" | grep -q "^DONE"; then
             echo "$(date): finished cleanly" >> "$LOG"
