@@ -73,7 +73,7 @@ def bend_pl(f, norm, f_bend, alpha_lo, alpha_hi, sharpness):
     ) ** (1.0 / sharpness)
 
 
-def simulate_or_load(row, lc_dir):
+def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
     """Return (t_years, flux, err) for one CSV row, simulating and caching
     the light curve on first use."""
     lc_id = int(row["ID"])
@@ -109,7 +109,7 @@ def simulate_or_load(row, lc_dir):
         noise_sigma=float(row["noiseSIGMA"]),
         mean_signal=None,
         leakage_margin=10.0,
-        enforce_leakage_margin=True,
+        enforce_leakage_margin=enforce_leakage_margin,
         seed=int(row["sampleSEED"]),
     )
     t = t - t[0]
@@ -200,6 +200,14 @@ def main():
     ap.add_argument(
         "--models", default="all", help="comma list of drw,carma,obpl or 'all'"
     )
+    ap.add_argument(
+        "--enforce-leakage-margin",
+        type=lambda s: s.lower() != "false",
+        default=True,
+        help="raise if simulated baseline is under leakage_margin=10x the "
+        "observed span (S1); pass false to accept a shorter margin (as done "
+        "for scenario 3.5 at NumofWINDOW=20, see changes_and_decisions.md)",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -230,7 +238,9 @@ def main():
         if not todo:
             continue
 
-        t, y, yerr = simulate_or_load(row, args.lc_dir)
+        t, y, yerr = simulate_or_load(
+            row, args.lc_dir, enforce_leakage_margin=args.enforce_leakage_margin
+        )
         need = {fn.split("_")[0] for fn in todo}
         specs, n_comp = build_models(t, want=need)
 
