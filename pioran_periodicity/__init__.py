@@ -12,6 +12,20 @@ Design rules (see the accompanying fix report):
 * all log parameters are base-10; every sampler setting is recorded.
 """
 
+from .visualization import (
+    load_summary,
+    plot_fpr_calibration,
+    plot_power_curves,
+    plot_roc,
+    plot_strip,
+    roc_from_bf,
+)
+
+# .visualization must import matplotlib.pyplot before anything below pulls in
+# pioranpy: juliacall's Julia init prepends its own libexpat to
+# DYLD_LIBRARY_PATH, and matplotlib (via font_manager -> plistlib) needs the
+# system libexpat -- whichever loads first wins the process-wide symbol
+# table, so pyplot must be imported first.
 from .data import load_pg1302, load_pg1553, load_photometry_csv, load_three_column
 from .inference import (
     FitResult,
@@ -75,4 +89,10 @@ __all__ = [
     "load_pg1553",
     "load_photometry_csv",
     "load_three_column",
+    "load_summary",
+    "plot_strip",
+    "plot_power_curves",
+    "plot_fpr_calibration",
+    "plot_roc",
+    "roc_from_bf",
 ]

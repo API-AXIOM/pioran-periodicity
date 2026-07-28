@@ -2,13 +2,30 @@
 
 For each row of a scenario config CSV (columns: ID, bendfreq, lowalpha,
 highalpha, sharpness, rms, NumofWINDOW, NightsperWINDOW, OBSperiod,
-WINDOWwidth, dataLOSSfrac, noiseSIGMA, simSEED, sampleSEED):
+WINDOWwidth, dataLOSSfrac, noiseSIGMA, simSEED, sampleSEED; optionally
+period, A1 -- see below):
   1. simulate a light curve from the true bending-power-law PSD with the
      package simulator (seeds taken from the config CSV for reproducibility),
+     adding a true sine signal if the row has ``period``/``A1`` columns with
+     ``A1 != 0`` (amplitude ``A1`` directly, zero phase -- matches the
+     confirmed thesis-text convention "A_sine = A1", NOT
+     ``original/batch_run.py``'s unrelated ``0.15*A1`` scaling; see
+     ``workspace/run_sim.py``'s ``SCENARIOS["3.7"]`` comment in the
+     thesis-replication repo, which pins this down explicitly),
   2. cache it under ``<lc-dir>/<ID>.npz`` for future reuse,
   3. fit the requested models (DRW, CARMA, OBPL, each with/without a sine
      mean) with nested sampling and save each FitResult under
      ``<out-dir>/<ID>_<model>.json``.
+
+A CSV without ``period``/``A1`` columns (or with ``A1 == 0``) simulates pure
+red noise, as before -- this is what makes a config a genuine null/no-signal
+scenario for FPR calibration.
+
+The sine period prior's upper bound is set from the CSV's own ``period``
+column (max true period + 0.5 yr headroom, floor 4.0 yr) so a signal-bearing
+scenario's true periods always fall inside the fitted prior's support --
+mirrors ``workspace/run_sim.py``'s per-scenario ``period_max`` (e.g. 8.0 for
+3.7's periods up to 7.5 yr).
 
 Resumable: existing light-curve .npz files are reused, existing per-fit
 JSONs are skipped. Split across workers with --stride / --worker.
@@ -30,6 +47,7 @@ import pandas as pd
 import pioran_periodicity as pp
 from pioran_periodicity.inference import SamplerSettings, run_nested, save_result
 from pioran_periodicity.kernels import FrequencyBand, psd_approximation_error
+from pioran_periodicity.means import sine_mean
 from pioran_periodicity.simulate import sample_seasonal_pattern, simulate_lightcurve
 
 # Simulation grid constants
@@ -42,18 +60,22 @@ PSD_NORM = 20.0
 OBPL_N_COMPONENTS = 20
 OBPL_MAX_REL_ERROR = 0.05
 
+
 # Prior configuration for the simulation study. Amplitude-like priors are set
 # from the KNOWN simulation scale, never from the fitted data. No error-scale
-# parameter: the simulation noise is known exactly.
-CFG = pp.PriorConfig(
-    log10_variance=(-4.0, 1.0),
-    log10_fbend=(-3.0, 2.0),
-    alpha_low=(0.0, 2.0),
-    alpha_high_max=4.0,
-    sine_amplitude_scale=0.15,
-    period=(0.2, 4.0),
-    err_scale=None,
-)
+# parameter: the simulation noise is known exactly. Only the sine period cap
+# varies (per config CSV, from its own period column -- see make_cfg/main).
+def make_cfg(period_max: float = 4.0) -> pp.PriorConfig:
+    return pp.PriorConfig(
+        log10_variance=(-4.0, 1.0),
+        log10_fbend=(-3.0, 2.0),
+        alpha_low=(0.0, 2.0),
+        alpha_high_max=4.0,
+        sine_amplitude_scale=0.15,
+        period=(0.2, period_max),
+        err_scale=None,
+    )
+
 
 MODEL_FILE_NAMES = {
     "drw": "drw",
@@ -71,6 +93,27 @@ def bend_pl(f, norm, f_bend, alpha_lo, alpha_hi, sharpness):
     return (norm * (f / f_bend) ** alpha_lo) / (
         1.0 + (f / f_bend) ** (sharpness * (alpha_lo - alpha_hi))
     ) ** (1.0 / sharpness)
+
+
+def true_mean_signal(row):
+    """The true periodic signal to inject, or None for a pure-red-noise
+    (null) light curve.
+
+    ``period``/``A1`` are optional CSV columns; a CSV that omits them, or
+    sets ``A1 == 0``, simulates pure red noise -- this is what makes a
+    config a genuine null scenario for FPR calibration. When present, ``A1``
+    IS the true amplitude directly (thesis-text convention "A_sine = A1",
+    confirmed in workspace/run_sim.py's SCENARIOS["3.7"] comment in the
+    thesis-replication repo -- NOT a fraction of rms; do not reintroduce an
+    ``rms *`` scaling here without re-checking that source).
+    """
+    if "period" not in row.index or "A1" not in row.index:
+        return None
+    amplitude = float(row["A1"])
+    if amplitude == 0.0:
+        return None
+    period = float(row["period"])
+    return lambda t_years: sine_mean(t_years, 0.0, amplitude, period)
 
 
 def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
@@ -107,7 +150,7 @@ def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
         obs_per_night=1,
         data_loss_frac=float(row["dataLOSSfrac"]),
         noise_sigma=float(row["noiseSIGMA"]),
-        mean_signal=None,
+        mean_signal=true_mean_signal(row),
         leakage_margin=10.0,
         enforce_leakage_margin=enforce_leakage_margin,
         seed=int(row["sampleSEED"]),
@@ -123,6 +166,8 @@ def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
         yerr=yerr,
         highalpha=float(row["highalpha"]),
         bendfreq=float(row["bendfreq"]),
+        true_period=float(row["period"]) if "period" in row.index else np.nan,
+        true_A1=float(row["A1"]) if "A1" in row.index else 0.0,
         lowalpha=float(row["lowalpha"]),
         sharpness=float(row["sharpness"]),
         rms=float(row["rms"]),
@@ -147,20 +192,20 @@ def obpl_components(t):
     return band, n, err
 
 
-def build_models(t, want=("drw", "carma", "obpl")):
+def build_models(t, cfg, want=("drw", "carma", "obpl")):
     """Return {file_model_name: ModelSpec} for the requested noise families."""
     families = {}
     n_comp = None
     if "drw" in want:
-        families["drw"] = pp.build_family("drw", CFG, variants=("plain", "sine"))
+        families["drw"] = pp.build_family("drw", cfg, variants=("plain", "sine"))
     if "carma" in want:
         families["carma"] = pp.build_family(
-            "carma", CFG, variants=("plain", "sine"), carma_order=(2, 1)
+            "carma", cfg, variants=("plain", "sine"), carma_order=(2, 1)
         )
     if "obpl" in want:
         band, n_comp, _ = obpl_components(t)
         families["obpl"] = pp.build_family(
-            "obpl", CFG, variants=("plain", "sine"), band=band, n_components=n_comp
+            "obpl", cfg, variants=("plain", "sine"), band=band, n_components=n_comp
         )
     specs = {}
     for fam in families.values():
@@ -212,6 +257,12 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     df = pd.read_csv(args.config_csv)
+
+    period_max = 4.0
+    if "period" in df.columns:
+        period_max = max(period_max, float(df["period"].max()) + 0.5)
+    cfg = make_cfg(period_max)
+
     picked = (
         df[df[args.filter_col] == args.filter_value]
         .groupby(args.group_col, sort=True)
@@ -242,7 +293,7 @@ def main():
             row, args.lc_dir, enforce_leakage_margin=args.enforce_leakage_margin
         )
         need = {fn.split("_")[0] for fn in todo}
-        specs, n_comp = build_models(t, want=need)
+        specs, n_comp = build_models(t, cfg, want=need)
 
         for fn in todo:
             spec = specs[fn]
@@ -258,6 +309,8 @@ def main():
                 lc_id=lc_id,
                 n_points=len(t),
                 obpl_n_components=n_comp,
+                true_period=float(row["period"]) if "period" in row.index else None,
+                true_A1=float(row["A1"]) if "A1" in row.index else 0.0,
             )
             save_result(result, out_path)
             flag = "" if result.converged else " [UNCONVERGED]"

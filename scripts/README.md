@@ -22,11 +22,44 @@ existing fit-result JSONs. Splittable across workers with `--stride`/`--worker`.
 
 Expected config CSV columns: `ID, bendfreq, lowalpha, highalpha, sharpness,
 rms, NumofWINDOW, NightsperWINDOW, OBSperiod, WINDOWwidth, dataLOSSfrac,
-noiseSIGMA, simSEED, sampleSEED`.
+noiseSIGMA, simSEED, sampleSEED`, plus optionally `period, A1` — when
+present (and `A1 != 0`) a true sine signal (amplitude `A1` directly, zero
+phase) is injected into the simulated light curve, making the scenario a
+detection-power study rather than a null/false-positive-rate one. The sine
+model's period prior is automatically widened to cover the CSV's own max
+`period` (see the module docstring for both conventions).
 
 Outputs: `<lc-dir>/<ID>.npz` (cached light curves), `<out-dir>/<ID>_<model>.json`
 (FitResult JSONs, `<model>` in `drw`, `drw_sine`, `carma`, `carma_sine`,
 `obpl`, `obpl_sine`).
+
+## `make_slope_robustness_csv.py`
+
+Builds a `run_sim.py` config CSV for the DRW-robustness sensitivity study:
+crosses a swept PSD high-frequency slope (`highalpha`) with either no true
+signal (`--variant null`, a false-positive-rate scenario) or period-specific
+injected-sine amplitude triads (`--variant signal`, a detection-power
+scenario; default triads were empirically calibrated per period, not
+guessed — see the module docstring for the calibration batches behind them).
+
+## `run_workers.sh`
+
+Launches N crash-restarting `run_sim.py` workers against a scenario CSV,
+splitting it by `--stride`/`--worker`. Resumable (safe to relaunch after any
+crash or manual stop — cached light curves and existing fit JSONs are
+skipped). Defaults (`MODELS=drw`, `FILTER_COL=lowalpha`,
+`FILTER_VALUE=-1.0`, `ENFORCE_LEAKAGE=false`) match the DRW-robustness
+study's scenario CSVs; override via environment variables for other
+scenarios (e.g. `MODELS=all FILTER_VALUE=0.0 ./run_workers.sh ...`). See the
+script header for the full variable list.
+
+    ./run_workers.sh <data-dir> <csv-path> <n-workers>
+
+## `plot_bf_results.py`
+
+CLI for `pioran_periodicity.visualization` — turns `aggregate_results.py`
+summary JSONs into strip / power-curve / FPR-calibration / ROC figures
+(`strip`, `power-curves`, `fpr-calibration`, `roc` subcommands).
 
 ## `run_realdata.py`
 
