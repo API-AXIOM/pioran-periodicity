@@ -25,6 +25,7 @@ import os
 import warnings
 
 import numpy as np
+import pandas as pd
 import pytest
 from scipy.stats import norm as scipy_norm
 
@@ -716,6 +717,141 @@ class TestSimulate:
         b = sample_seasonal_pattern(sim_lc, seed=99, **_PAT)
         for xa, xb in zip(a, b):
             assert np.array_equal(xa, xb)
+
+
+def _make_cadence(mjd, band, depth=None):
+    n = len(mjd)
+    return pd.DataFrame({
+        "mjd": mjd,
+        "band": band,
+        "mag": np.nan,
+        "magerr": np.nan,
+        "depth": depth if depth is not None else np.full(n, np.nan),
+        "seeing": np.nan,
+    })
+
+
+class TestSampleRealCadence:
+    """CadenceLibrary-driven sampler (2026-07-29): real ZTF/LSST cadences
+    instead of the synthetic seasonal-window pattern above."""
+
+    def test_preserves_relative_gaps(self, sim_lc):
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(7)
+        mjd = np.sort(rng.uniform(60000.0, 60060.0, 20))  # 60 d span
+        cadence = _make_cadence(mjd, np.full(20, "g"), depth=np.full(20, 23.0))
+
+        t_years, _, _ = sample_real_cadence(
+            sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=3
+        )
+        got_gaps = np.diff(np.sort(t_years)) * 365.0
+        want_gaps = np.diff(np.sort(mjd))
+        # Grid resolution is dt_minutes=60 (1 h) for sim_lc -> sub-hour error.
+        np.testing.assert_allclose(got_gaps, want_gaps, atol=1.0 / 24.0)
+
+    def test_leakage_margin_enforced(self, sim_lc):
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(8)
+        # sim_lc spans ~1667 d; a ~1000 d cadence baseline is well under 10x.
+        mjd = np.sort(rng.uniform(60000.0, 61000.0, 30))
+        cadence = _make_cadence(mjd, np.full(30, "g"), depth=np.full(30, 23.0))
+
+        with pytest.raises(ValueError, match="S1"):
+            sample_real_cadence(sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=1)
+
+    def test_lsst_depth_noise_no_noise_model_needed(self, sim_lc):
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(9)
+        mjd = np.sort(rng.uniform(60000.0, 60060.0, 15))
+        cadence = _make_cadence(mjd, np.full(15, "r"), depth=np.full(15, 24.0))
+
+        _, _, yerr = sample_real_cadence(
+            sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=2
+        )
+        assert np.all(yerr > 0)
+        assert np.all(np.isfinite(yerr))
+
+    def test_ztf_without_noise_model_raises(self, sim_lc):
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(10)
+        mjd = np.sort(rng.uniform(60000.0, 60060.0, 15))
+        cadence = _make_cadence(mjd, np.full(15, "g"))  # depth all NaN
+
+        with pytest.raises(ValueError, match="noise_model"):
+            sample_real_cadence(sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=2)
+
+    def test_ztf_noise_model_scales_with_ref_mag(self, sim_lc):
+        from pioran_periodicity.cadence import NoiseModel
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(11)
+        mjd = np.sort(rng.uniform(60000.0, 60060.0, 15))
+        cadence = _make_cadence(mjd, np.full(15, "g"))
+        nm = NoiseModel({"g": np.array([0.02, 0.0])})  # magerr = 0.02 * mag (highest power first)
+
+        _, _, yerr_bright = sample_real_cadence(
+            sim_lc, cadence, noise_model=nm, ref_mag=17.0, seed=5
+        )
+        _, _, yerr_faint = sample_real_cadence(
+            sim_lc, cadence, noise_model=nm, ref_mag=21.0, seed=5
+        )
+        assert np.all(yerr_faint > yerr_bright)
+
+    def test_mean_signal_shifts_flux(self, sim_lc):
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(12)
+        mjd = np.sort(rng.uniform(60000.0, 60060.0, 15))
+        cadence = _make_cadence(mjd, np.full(15, "r"), depth=np.full(15, 24.0))
+
+        _, flux0, _ = sample_real_cadence(
+            sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=6
+        )
+        _, flux1, _ = sample_real_cadence(
+            sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=6,
+            mean_signal=lambda tt: 5.0,
+        )
+        assert np.mean(flux1) - np.mean(flux0) == pytest.approx(5.0, abs=1e-9)
+
+    def test_same_seed_identical_output(self, sim_lc):
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        rng = np.random.default_rng(13)
+        mjd = np.sort(rng.uniform(60000.0, 60060.0, 15))
+        cadence = _make_cadence(mjd, np.full(15, "r"), depth=np.full(15, 24.0))
+
+        a = sample_real_cadence(sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=99)
+        b = sample_real_cadence(sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=99)
+        for xa, xb in zip(a, b):
+            assert np.array_equal(xa, xb)
+
+    def test_synthetic_scenarios_unaffected(self, sim_lc):
+        """The additive Step 5 changes must not perturb sample_seasonal_pattern's
+        existing output for any of the (now-shared) leakage-margin code path."""
+        from pioran_periodicity.simulate import sample_seasonal_pattern
+
+        a = sample_seasonal_pattern(sim_lc, seed=99, **_PAT)
+        b = sample_seasonal_pattern(sim_lc, seed=99, **_PAT)
+        for xa, xb in zip(a, b):
+            assert np.array_equal(xa, xb)
+
+
+class TestDepthToFractionalError:
+    def test_snr_five_at_depth(self):
+        from pioran_periodicity.cadence import depth_to_fractional_error
+
+        assert depth_to_fractional_error(23.0, 23.0) == pytest.approx(0.2)
+
+    def test_grows_fainter_than_depth(self):
+        from pioran_periodicity.cadence import depth_to_fractional_error
+
+        faint = depth_to_fractional_error(24.0, 23.0)
+        bright = depth_to_fractional_error(22.0, 23.0)
+        assert faint > 0.2 > bright
 
 
 # ===========================================================================

@@ -12,9 +12,12 @@ import numpy as np
 import pytest
 
 from pioran_periodicity.visualization import (
+    filter_table,
     key_for,
     parse_key,
+    plot_detection_rate,
     plot_fpr_calibration,
+    plot_matched_roc,
     plot_power_curves,
     plot_roc,
     plot_strip,
@@ -110,4 +113,43 @@ def test_plot_roc_smoke(table_1d, table_2d):
         for fam in FAMILIES
     }
     fig = plot_roc(null_values, table_2d, "period", "A1", 0.25, families=FAMILIES)
+    assert len(fig.axes) == len(FAMILIES)
+
+
+def test_filter_table(table_2d):
+    sub = filter_table(table_2d, lambda p: p["period"] == 1.25)
+    assert sweep_values(sub, "period") == [1.25]
+    assert sweep_values(sub, "A1") == [0.25, 0.5]
+
+
+def test_plot_detection_rate_smoke(table_1d):
+    fig = plot_detection_rate(table_1d, "highalpha", families=FAMILIES)
+    assert len(fig.axes) == len(FAMILIES)
+
+
+@pytest.fixture
+def table_ha_period():
+    """Two periods swept over the same highalpha grid as table_1d, shaped
+    like a signal_case table paired against table_1d as the matching null.
+    """
+    rng = np.random.default_rng(2)
+    xs = [-4.0, -3.0, -2.0]
+    periods = [1.25, 3.75]
+    table = {}
+    for x in xs:
+        for p in periods:
+            key = f"highalpha={x:g}, period={p:g}"
+            table[key] = {fam: _cell(rng, -x - 4) for fam in FAMILIES}
+    return table
+
+
+def test_plot_matched_roc_smoke(table_1d, table_ha_period):
+    fig = plot_matched_roc(
+        table_1d,
+        table_ha_period,
+        match_col="highalpha",
+        match_values=[-4.0, -2.0],
+        families=FAMILIES,
+        alt_filter={"period": 1.25},
+    )
     assert len(fig.axes) == len(FAMILIES)

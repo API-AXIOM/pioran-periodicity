@@ -26,3 +26,20 @@ pioranpy/Julia call involved, just reads the JSON.
 conda run -n <env> python paper/plot_corners.py \
     --results-dir <results-dir> --out-dir <out-dir>/corner
 ```
+
+## `plot_drw_robustness.py`
+
+FPR, detection-power, and ROC figures for the DRW-robustness sensitivity
+study (`null_case`/`signal_case` from `scripts/make_slope_robustness_csv.py`
++ `scripts/run_sim.py`). Groups results off each FitResult's own `meta` via
+`aggregate_results.build_table` rather than a config CSV, since these
+results directories are assembled from several pilot/extension CSVs with
+non-contiguous ID ranges. Uses `pioran_periodicity.visualization`'s
+`plot_detection_rate`/`plot_power_curves`/`plot_matched_roc`.
+
+```
+conda run -n <env> python paper/plot_drw_robustness.py \
+    --null-dir <sim-dir>/null_case/results \
+    --signal-dir <sim-dir>/signal_case/results \
+    --out-dir paper/figures
+```

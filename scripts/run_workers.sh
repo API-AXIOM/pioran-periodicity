@@ -19,6 +19,14 @@
 #   ENFORCE_LEAKAGE  true/false, run_sim.py --enforce-leakage-margin
 #                    (default: false -- see changes_and_decisions.md re: S1
 #                    at NumofWINDOW=20)
+#   CADENCE_LIBRARY  path to a CadenceLibrary.to_cache() dir, passed as
+#                    run_sim.py --cadence-library (default: unset -- only
+#                    needed for a cadence_source CSV, e.g. the real ZTF/LSST
+#                    cadence campaigns; see pioran_periodicity.cadence)
+#   N_SAMPLES      run_sim.py --n-samples override (default: unset -- only
+#                  needed to re-simulate a synthetic-window CSV at a longer
+#                  length to fix an S1 violation; cadence_source CSVs pick
+#                  their own longer default automatically)
 #   CONDA_ENV      conda environment to run in (default: pioran-periodicity,
 #                  matching docs/installation.md)
 #
@@ -39,6 +47,8 @@ MODELS="${MODELS:-drw}"
 FILTER_COL="${FILTER_COL:-lowalpha}"
 FILTER_VALUE="${FILTER_VALUE:--1.0}"
 ENFORCE_LEAKAGE="${ENFORCE_LEAKAGE:-false}"
+CADENCE_LIBRARY="${CADENCE_LIBRARY:-}"
+N_SAMPLES="${N_SAMPLES:-}"
 CONDA_ENV="${CONDA_ENV:-pioran-periodicity}"
 
 case "$CSV" in
@@ -52,16 +62,26 @@ TAG="$(basename "${CSV%.csv}")"
 if [ $# -ge 4 ]; then
     WORKER="$4"
     LOG="$DATA/logs/sim_${TAG}_w${WORKER}.log"
+    # Built as one array (never empty -- always has the base args below) and
+    # extended conditionally, rather than splicing in a possibly-empty
+    # array: bash 3.2 (macOS's default /bin/bash) mishandles
+    # "${EMPTY_ARRAY[@]}" under `set -u`, either erroring as an unbound
+    # variable or (with the :- fallback) injecting a spurious empty-string
+    # argument that would break run_sim.py's argument parsing.
+    ARGS=(
+        --config-csv "$CSV_PATH"
+        --lc-dir "$DATA/lightcurves"
+        --out-dir "$DATA/results"
+        --n-sims 100000 --stride "$NWORKERS" --worker "$WORKER"
+        --filter-col "$FILTER_COL" --filter-value "$FILTER_VALUE"
+        --enforce-leakage-margin "$ENFORCE_LEAKAGE"
+        --models "$MODELS"
+    )
+    [ -n "$CADENCE_LIBRARY" ] && ARGS+=(--cadence-library "$CADENCE_LIBRARY")
+    [ -n "$N_SAMPLES" ] && ARGS+=(--n-samples "$N_SAMPLES")
     n=0
     while true; do
-        conda run -n "$CONDA_ENV" python "$SCRIPT_DIR/run_sim.py" \
-            --config-csv "$CSV_PATH" \
-            --lc-dir "$DATA/lightcurves" \
-            --out-dir "$DATA/results" \
-            --n-sims 100000 --stride "$NWORKERS" --worker "$WORKER" \
-            --filter-col "$FILTER_COL" --filter-value "$FILTER_VALUE" \
-            --enforce-leakage-margin "$ENFORCE_LEAKAGE" \
-            --models "$MODELS" \
+        conda run -n "$CONDA_ENV" python "$SCRIPT_DIR/run_sim.py" "${ARGS[@]}" \
             >> "$LOG" 2>&1
         if tail -50 "$LOG" | grep -q "^DONE"; then
             echo "$(date): finished cleanly" >> "$LOG"

@@ -1,9 +1,23 @@
 """Simulate light curves from a bending-power-law PSD and fit noise models.
 
 For each row of a scenario config CSV (columns: ID, bendfreq, lowalpha,
-highalpha, sharpness, rms, NumofWINDOW, NightsperWINDOW, OBSperiod,
-WINDOWwidth, dataLOSSfrac, noiseSIGMA, simSEED, sampleSEED; optionally
-period, A1 -- see below):
+highalpha, sharpness, rms, simSEED, sampleSEED; optionally period, A1 -- see
+below), the observation cadence comes from EITHER of two mutually exclusive
+column groups:
+
+* synthetic seasonal window (the original path): NumofWINDOW,
+  NightsperWINDOW, OBSperiod, WINDOWwidth, dataLOSSfrac, noiseSIGMA.
+* a real survey cadence (2026-07-29): ``cadence_source`` (format
+  ``<survey>:<object_id>``, e.g. ``ztf:SDSS_J075056.32+525640.9``) plus
+  ``ref_mag`` (the object's fixed catalog magnitude, used to evaluate the
+  survey's heteroscedastic noise model). Requires ``--cadence-library``.
+  See ``pioran_periodicity.cadence.CadenceLibrary`` and
+  ``pioran_periodicity.simulate.sample_real_cadence``.
+
+A CSV mixes rows from either group; each row's own columns decide which path
+it takes.
+
+The steps for each row:
   1. simulate a light curve from the true bending-power-law PSD with the
      package simulator (seeds taken from the config CSV for reproducibility),
      adding a true sine signal if the row has ``period``/``A1`` columns with
@@ -45,13 +59,24 @@ import numpy as np
 import pandas as pd
 
 import pioran_periodicity as pp
+from pioran_periodicity.cadence import CadenceLibrary
 from pioran_periodicity.inference import SamplerSettings, run_nested, save_result
 from pioran_periodicity.kernels import FrequencyBand, psd_approximation_error
 from pioran_periodicity.means import sine_mean
-from pioran_periodicity.simulate import sample_seasonal_pattern, simulate_lightcurve
+from pioran_periodicity.simulate import (
+    sample_real_cadence,
+    sample_seasonal_pattern,
+    simulate_lightcurve,
+)
 
 # Simulation grid constants
-N_SAMPLES = 2**21  # TK95 realisation length (39.9 yr at 10 min)
+N_SAMPLES = 2**21  # TK95 realisation length (39.9 yr at 10 min) -- synthetic scenarios
+# Real ZTF/LSST cadences span the full multi-year survey history (up to ~10 yr),
+# not a hand-picked short window -- N_SAMPLES leaves only a ~4-5.6x leakage
+# margin (S1) against that, under the 10x default. 2**23 (159.6 yr) clears 10x
+# for both surveys (ZTF ~21.6x, LSST ~16.0x). Only used for cadence_source rows;
+# synthetic scenarios keep N_SAMPLES so their cached .npz files stay valid.
+N_SAMPLES_REAL_CADENCE = 2**23
 DT_MINUTES = 10.0
 PSD_NORM = 20.0
 
@@ -116,14 +141,38 @@ def true_mean_signal(row):
     return lambda t_years: sine_mean(t_years, 0.0, amplitude, period)
 
 
-def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
+def has_real_cadence(row) -> bool:
+    return "cadence_source" in row.index and pd.notna(row["cadence_source"])
+
+
+def simulate_or_load(
+    row, lc_dir, enforce_leakage_margin=True, cadence_lib=None, n_samples_override=None
+):
     """Return (t_years, flux, err) for one CSV row, simulating and caching
-    the light curve on first use."""
+    the light curve on first use.
+
+    ``row["cadence_source"]`` (format ``<survey>:<object_id>``), if present
+    and non-null, samples a REAL survey cadence via ``cadence_lib`` instead
+    of the synthetic seasonal-window pattern -- see module docstring.
+
+    ``n_samples_override``, if given, forces the TK95 simulation length for
+    EVERY row in this call, superseding the cadence_source-based default
+    below -- for re-simulating a synthetic-window (non-cadence_source) CSV
+    at a longer length to fix a leakage-margin violation (S1) that the
+    default N_SAMPLES doesn't clear for that CSV's observed baseline (e.g.
+    the original signal_case.csv/null_case.csv at NumofWINDOW=20).
+    """
     lc_id = int(row["ID"])
     path = os.path.join(lc_dir, f"{lc_id}.npz")
     if os.path.exists(path):
         d = np.load(path)
         return d["t"], d["y"], d["yerr"]
+
+    cadence_source = row["cadence_source"] if has_real_cadence(row) else None
+    if n_samples_override is not None:
+        n_samples = n_samples_override
+    else:
+        n_samples = N_SAMPLES_REAL_CADENCE if cadence_source is not None else N_SAMPLES
 
     psd_params = [
         PSD_NORM,
@@ -135,26 +184,45 @@ def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
     lc = simulate_lightcurve(
         bend_pl,
         psd_params,
-        n_samples=N_SAMPLES,
+        n_samples=n_samples,
         dt_minutes=DT_MINUTES,
         mean=1.0,
         rms=float(row["rms"]),
         seed=int(row["simSEED"]),
     )
-    t, y, yerr = sample_seasonal_pattern(
-        lc,
-        n_windows=int(row["NumofWINDOW"]),
-        nights_per_window=int(row["NightsperWINDOW"]),
-        window_period_months=float(row["OBSperiod"]),
-        window_width_days=float(row["WINDOWwidth"]),
-        obs_per_night=1,
-        data_loss_frac=float(row["dataLOSSfrac"]),
-        noise_sigma=float(row["noiseSIGMA"]),
-        mean_signal=true_mean_signal(row),
-        leakage_margin=10.0,
-        enforce_leakage_margin=enforce_leakage_margin,
-        seed=int(row["sampleSEED"]),
-    )
+
+    if cadence_source is not None:
+        if cadence_lib is None:
+            raise ValueError(
+                f"row {lc_id} has cadence_source={cadence_source!r} but no "
+                f"--cadence-library was given"
+            )
+        survey, object_id = str(cadence_source).split(":", 1)
+        t, y, yerr = sample_real_cadence(
+            lc,
+            cadence_lib.get(survey, object_id),
+            noise_model=cadence_lib.noise_models.get(survey),
+            ref_mag=float(row["ref_mag"]),
+            mean_signal=true_mean_signal(row),
+            leakage_margin=10.0,
+            enforce_leakage_margin=enforce_leakage_margin,
+            seed=int(row["sampleSEED"]),
+        )
+    else:
+        t, y, yerr = sample_seasonal_pattern(
+            lc,
+            n_windows=int(row["NumofWINDOW"]),
+            nights_per_window=int(row["NightsperWINDOW"]),
+            window_period_months=float(row["OBSperiod"]),
+            window_width_days=float(row["WINDOWwidth"]),
+            obs_per_night=1,
+            data_loss_frac=float(row["dataLOSSfrac"]),
+            noise_sigma=float(row["noiseSIGMA"]),
+            mean_signal=true_mean_signal(row),
+            leakage_margin=10.0,
+            enforce_leakage_margin=enforce_leakage_margin,
+            seed=int(row["sampleSEED"]),
+        )
     t = t - t[0]
     y = y - np.median(y)
 
@@ -171,7 +239,8 @@ def simulate_or_load(row, lc_dir, enforce_leakage_margin=True):
         lowalpha=float(row["lowalpha"]),
         sharpness=float(row["sharpness"]),
         rms=float(row["rms"]),
-        noiseSIGMA=float(row["noiseSIGMA"]),
+        noiseSIGMA=float(row["noiseSIGMA"]) if "noiseSIGMA" in row.index else np.nan,
+        cadence_source=str(cadence_source) if cadence_source is not None else "",
         simSEED=int(row["simSEED"]),
         sampleSEED=int(row["sampleSEED"]),
         n_points=len(t),
@@ -253,10 +322,35 @@ def main():
         "observed span (S1); pass false to accept a shorter margin (as done "
         "for scenario 3.5 at NumofWINDOW=20, see changes_and_decisions.md)",
     )
+    ap.add_argument(
+        "--cadence-library",
+        default=None,
+        help="path to a CadenceLibrary.to_cache() directory; required if "
+        "--config-csv has any non-null cadence_source rows (real ZTF/LSST "
+        "cadences instead of the synthetic seasonal window)",
+    )
+    ap.add_argument(
+        "--n-samples",
+        type=int,
+        default=None,
+        help="override the TK95 simulation length (samples) for every row "
+        "in this CSV; default: N_SAMPLES_REAL_CADENCE for cadence_source "
+        "rows, N_SAMPLES otherwise. Use this to re-simulate a "
+        "synthetic-window CSV at a longer length to fix a leakage-margin "
+        "violation (S1) its default N_SAMPLES doesn't clear.",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
     df = pd.read_csv(args.config_csv)
+
+    needs_cadence_lib = "cadence_source" in df.columns and df["cadence_source"].notna().any()
+    if needs_cadence_lib and not args.cadence_library:
+        raise ValueError(
+            f"{args.config_csv} has cadence_source rows but --cadence-library "
+            f"was not given"
+        )
+    cadence_lib = CadenceLibrary.from_cache(args.cadence_library) if args.cadence_library else None
 
     period_max = 4.0
     if "period" in df.columns:
@@ -290,7 +384,11 @@ def main():
             continue
 
         t, y, yerr = simulate_or_load(
-            row, args.lc_dir, enforce_leakage_margin=args.enforce_leakage_margin
+            row,
+            args.lc_dir,
+            enforce_leakage_margin=args.enforce_leakage_margin,
+            cadence_lib=cadence_lib,
+            n_samples_override=args.n_samples,
         )
         need = {fn.split("_")[0] for fn in todo}
         specs, n_comp = build_models(t, cfg, want=need)

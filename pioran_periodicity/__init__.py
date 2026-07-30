@@ -13,8 +13,11 @@ Design rules (see the accompanying fix report):
 """
 
 from .visualization import (
+    filter_table,
     load_summary,
+    plot_detection_rate,
     plot_fpr_calibration,
+    plot_matched_roc,
     plot_power_curves,
     plot_roc,
     plot_strip,
@@ -55,7 +58,7 @@ from .priors import (
     Uniform,
 )
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "Uniform",
@@ -90,9 +93,12 @@ __all__ = [
     "load_photometry_csv",
     "load_three_column",
     "load_summary",
+    "filter_table",
     "plot_strip",
     "plot_power_curves",
+    "plot_detection_rate",
     "plot_fpr_calibration",
     "plot_roc",
+    "plot_matched_roc",
     "roc_from_bf",
 ]

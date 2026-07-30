@@ -8,9 +8,10 @@ A1=0.24"`` -- ``parse_key`` below inverts that for any number of columns, so
 these functions work for whatever a scenario's config CSV sweeps, not just
 the columns used in the thesis scenarios (3.4-3.7).
 
-Four plot kinds, ported from a throwaway prototype
+Six plot kinds. The first four were ported from a throwaway prototype
 (``workspace/plot_bf_prototypes.py`` in the thesis-replication repo) after
-picking the most illustrative subset for the paper:
+picking the most illustrative subset for the paper; the last two were added
+for the DRW-robustness sensitivity study (see ``paper/plot_drw_robustness.py``):
 
 * ``plot_strip``           -- per-configuration log10 BF scatter+box, with
                                optional Kass-Raftery decision-zone shading.
@@ -24,6 +25,18 @@ picking the most illustrative subset for the paper:
                                pair the caller assembles (there is no single
                                correct way to pool a null sample across
                                scenarios, so this module does not guess).
+* ``plot_detection_rate``  -- P(detect) vs. one swept variable at the fixed
+                               Kass-Raftery threshold, with binomial standard
+                               error bars and no series dimension -- the
+                               single-curve sibling of ``plot_power_curves``
+                               (e.g. a false-positive-rate curve from a null
+                               scenario's own table, no threshold sweep).
+* ``plot_matched_roc``     -- ROC curves where the null and alternative
+                               samples are drawn from *different* tables but
+                               paired by a shared swept column (e.g. a
+                               null_case and a signal_case table both swept
+                               over the same ``highalpha`` grid) rather than
+                               a single null held fixed across series.
 
     conda run -n <env> python -c "
     from pioran_periodicity.visualization import load_summary, plot_strip
@@ -100,6 +113,16 @@ def key_for(table: dict, **cols: float) -> str:
     if len(matches) != 1:
         raise KeyError(f"expected exactly one key matching {cols}, found {matches}")
     return matches[0]
+
+
+def filter_table(table: dict, predicate) -> dict:
+    """Subset a summary table to keys whose parsed columns satisfy
+    ``predicate(parsed_key: dict[str, float]) -> bool``. Useful for pinning
+    one swept column (e.g. an amplitude tier that isn't the same value
+    across every other group column) before handing the result to a plot
+    function that expects a simpler grid.
+    """
+    return {k: v for k, v in table.items() if predicate(parse_key(k))}
 
 
 def roc_from_bf(
@@ -211,8 +234,14 @@ def plot_power_curves(
     series_label: str | None = None,
     title: str | None = None,
     cmap_name: str = "Blues",
+    invert_xaxis: bool = False,
 ):
-    """P(detect) vs. ``x_col``, one line per value of ``series_col``."""
+    """P(detect) vs. ``x_col``, one line per value of ``series_col``.
+
+    ``x_col``'s values are plotted in ascending numeric order by default;
+    set ``invert_xaxis=True`` when descending reads more naturally (e.g. a
+    slope that "steepens" as it becomes more negative).
+    """
     x_vals = sweep_values(table, x_col)
     series_vals = sweep_values(table, series_col)
     cmap = plt.get_cmap(cmap_name)
@@ -232,6 +261,8 @@ def plot_power_curves(
         ax.set_title(fam, color=family_colors[fam], fontsize=10)
         ax.grid(lw=0.5)
         ax.set_ylim(-0.02, 1.02)
+        if invert_xaxis:
+            ax.invert_xaxis()
     axes[0].set_ylabel("P(detect)")
     axes[-1].legend(
         title=series_label or series_col,
@@ -345,6 +376,123 @@ def plot_roc(
         f"{fixed_value:g}",
         fontsize=9.5,
     )
+    return fig
+
+
+def plot_detection_rate(
+    table: dict,
+    x_col: str,
+    families: Sequence[str] = FAMILIES,
+    family_colors: dict = FAMILY_COLOR,
+    x_label: str | None = None,
+    ylabel: str = "P(detect)",
+    title: str | None = None,
+    color: str | None = None,
+    invert_xaxis: bool = False,
+):
+    """P(detect) vs. ``x_col`` at the table's own Kass-Raftery threshold,
+    one panel per family, with binomial standard-error bars. No series
+    dimension -- use ``plot_power_curves`` when a second swept variable
+    should become separate lines.
+
+    ``x_col``'s values are plotted in ascending numeric order by default;
+    set ``invert_xaxis=True`` when descending reads more naturally (e.g. a
+    slope that "steepens" as it becomes more negative).
+    """
+    x_vals = sweep_values(table, x_col)
+    fig, axes = _family_panels(families, figsize=(11, 3.2))
+    for ax, fam in zip(axes, families):
+        rates, errs = [], []
+        for x in x_vals:
+            key = key_for(table, **{x_col: x})
+            stats = table[key][fam]
+            n = stats["n"]
+            p = stats["outcomes"]["detect"] / n
+            rates.append(p)
+            errs.append(np.sqrt(p * (1 - p) / n) if n > 0 else 0.0)
+        ax.errorbar(
+            x_vals,
+            rates,
+            yerr=errs,
+            marker="o",
+            ms=4,
+            lw=1.6,
+            capsize=3,
+            color=color or family_colors[fam],
+        )
+        ax.set_xlabel(x_label or x_col)
+        ax.set_title(fam, color=family_colors[fam], fontsize=10)
+        ax.grid(lw=0.5)
+        ax.set_ylim(-0.02, 1.02)
+        if invert_xaxis:
+            ax.invert_xaxis()
+    axes[0].set_ylabel(ylabel)
+    fig.suptitle(title or f"{ylabel} vs. {x_col}", fontsize=10)
+    return fig
+
+
+def plot_matched_roc(
+    null_table: dict,
+    alt_table: dict,
+    match_col: str,
+    match_values: Sequence[float],
+    families: Sequence[str] = FAMILIES,
+    family_colors: dict = FAMILY_COLOR,
+    alt_filter: dict[str, float] | None = None,
+    match_label: str | None = None,
+    title: str | None = None,
+    cmap_name: str = "Blues",
+    n_thresholds: int = 300,
+):
+    """ROC curves (TPR vs. FPR, threshold-swept) pairing a null and an
+    alternative table by a shared swept column, one line per value in
+    ``match_values``.
+
+    Unlike ``plot_roc`` (one null curve reused across several alternative
+    series), here *both* the null and the alternative sample change
+    together at each ``match_col`` value -- e.g. a null_case table and a
+    signal_case table both swept over the same ``highalpha`` grid, so the
+    false-positive baseline is always the matching-slope null rather than a
+    single pooled one.
+
+    ``alt_filter``: optional ``{col: value}`` constraints applied to
+    ``alt_table`` keys in addition to ``match_col`` (e.g. pin an amplitude
+    tier); any other columns in ``alt_table``'s keys are pooled together.
+    """
+    cmap = plt.get_cmap(cmap_name)
+    fig, axes = _family_panels(families, figsize=(11, 3.8), sharex=True, sharey=True)
+    for ax, fam in zip(axes, families):
+        for i, m in enumerate(match_values):
+            null_key = key_for(null_table, **{match_col: m})
+            null_vals = np.array(null_table[null_key][fam]["log10_BF_values"])
+            constraints = {match_col: m, **(alt_filter or {})}
+            alt_keys = [
+                k
+                for k in alt_table
+                if all(parse_key(k).get(c) == v for c, v in constraints.items())
+            ]
+            alt_vals = np.concatenate(
+                [np.array(alt_table[k][fam]["log10_BF_values"]) for k in alt_keys]
+            )
+            fpr, tpr = roc_from_bf(null_vals, alt_vals, n_thresholds=n_thresholds)
+            color = cmap(0.3 + 0.6 * i / max(len(match_values) - 1, 1))
+            ax.plot(fpr, tpr, color=color, lw=1.3, label=f"{m:g}")
+        ax.plot([0, 1], [0, 1], color=MUTED, lw=0.8, ls="--")
+        ax.set_title(fam, color=family_colors[fam], fontsize=10)
+        ax.set_xlabel("FPR", fontsize=8)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_aspect("equal")
+        ax.grid(lw=0.5)
+    axes[0].set_ylabel("TPR")
+    axes[-1].legend(
+        title=match_label or match_col,
+        frameon=False,
+        fontsize=6.5,
+        title_fontsize=7,
+        loc="lower right",
+    )
+    fig.suptitle(title or f"ROC, matched by {match_col}", fontsize=9.5)
     return fig
 
 
