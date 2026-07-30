@@ -20,7 +20,8 @@ launch it on a machine that does.
 
 - This repo (`pioran-periodicity`), specifically needs at least:
   `pioran_periodicity/`, `scripts/run_sim.py`, `scripts/run_workers.sh`,
-  `pyproject.toml`. Simplest: rsync the whole repo.
+  `scripts/orchestrate_campaign.sh`, `pyproject.toml`. Simplest: rsync the
+  whole repo.
 - The prebuilt cadence library cache (~58 MB, gzip CSV — see
   `pioran_periodicity.cadence.CadenceLibrary.to_cache`):
   ```
@@ -73,75 +74,76 @@ conda run -n pioran-periodicity pytest tests/
 name differs from `pioran-periodicity`, pass `CONDA_ENV=<name>` in every
 `run_workers.sh` invocation below.
 
-## 3. Launch commands
+## 3. Launch: unattended, sequential, survives SSH disconnect
 
-Run the null (cheap, ~1/3 the rows) variants first — fast sanity check and
-FPR results land within hours, before committing to the much larger signal
-runs. All commands assume `cd` into the repo. `<root>` = the remote data
-root from step 1 (holds `cadence_library/` and `scenario_csvs/`); each
-campaign gets its OWN data directory under `<root>/simulations/` (matching
-the existing campaigns' convention and `run_workers.sh`'s own `--lc-dir`/
-`--out-dir` = `$DATA/lightcurves`/`$DATA/results` layout) — do NOT pass
-`<root>` itself as `$DATA`, or all six campaigns' light curves/results will
-land in one shared, unsorted directory.
+For "start it and check back after a week," use `scripts/orchestrate_campaign.sh`
+— it runs all six CSVs in order (nulls first, cheap and fast; then the three
+much larger signal runs), waiting for each campaign to fully finish before
+starting the next, and logs progress to `$ROOT/orchestrator.log`. It does
+**not** detach itself, so run it inside `tmux` (recommended — lets you
+reattach and watch it later) or `nohup`+`disown` if `tmux` isn't available.
 
 ```bash
-ROOT=<root>   # e.g. ~/work/data/quasar_cadences
-SIMS=$ROOT/simulations
-
-# --- null cases (600 rows each, ~1800 total) ---
-
-MODELS=drw,obpl \
-CADENCE_LIBRARY=$ROOT/cadence_library \
-bash scripts/run_workers.sh "$SIMS/ztf_real_cadence_null_case" \
-    "$ROOT/scenario_csvs/ztf_real_cadence_null_case.csv" <N_WORKERS>
-
-MODELS=drw,obpl \
-CADENCE_LIBRARY=$ROOT/cadence_library \
-bash scripts/run_workers.sh "$SIMS/lsst_real_cadence_null_case" \
-    "$ROOT/scenario_csvs/lsst_real_cadence_null_case.csv" <N_WORKERS>
-
-MODELS=drw,obpl \
-N_SAMPLES=8388608 \
-ENFORCE_LEAKAGE=true \
-bash scripts/run_workers.sh "$SIMS/original_cadence_longsim_null_case" \
-    "$ROOT/scenario_csvs/original_cadence_longsim_null_case.csv" <N_WORKERS>
-
-# --- signal cases (5400 rows each, ~16200 total -- the bulk of the runtime) ---
-
-MODELS=drw,obpl \
-CADENCE_LIBRARY=$ROOT/cadence_library \
-bash scripts/run_workers.sh "$SIMS/ztf_real_cadence_signal_case" \
-    "$ROOT/scenario_csvs/ztf_real_cadence_signal_case.csv" <N_WORKERS>
-
-MODELS=drw,obpl \
-CADENCE_LIBRARY=$ROOT/cadence_library \
-bash scripts/run_workers.sh "$SIMS/lsst_real_cadence_signal_case" \
-    "$ROOT/scenario_csvs/lsst_real_cadence_signal_case.csv" <N_WORKERS>
-
-MODELS=drw,obpl \
-N_SAMPLES=8388608 \
-ENFORCE_LEAKAGE=true \
-bash scripts/run_workers.sh "$SIMS/original_cadence_longsim_signal_case" \
-    "$ROOT/scenario_csvs/original_cadence_longsim_signal_case.csv" <N_WORKERS>
+ROOT=<root>   # e.g. ~/work/data/quasar_cadences -- holds cadence_library/,
+              # scenario_csvs/, and where simulations/ will be created
 ```
 
-`<N_WORKERS>`: with 8-10 CPUs available, use all of them per invocation
-(run each campaign to completion before starting the next) rather than
-splitting cores across simultaneous campaigns — same total core-hours
-either way, but results land sooner per campaign for early inspection.
+**Option A — tmux (recommended):**
+
+```bash
+tmux new -s cadence_campaign
+# inside the tmux session:
+cd <path-to-pioran-periodicity>
+ROOT=<root> N_WORKERS=<8-10> CONDA_ENV=pioran-periodicity \
+    bash scripts/orchestrate_campaign.sh
+# detach: Ctrl-b then d -- the session (and everything in it) keeps running.
+```
+
+Reattach any time, from any SSH session, with `tmux attach -t cadence_campaign`.
+If the session already looks detached-but-alive when you reattach, that's
+expected — it just means it's between campaigns or mid-poll.
+
+**Option B — nohup + disown (no tmux):**
+
+```bash
+cd <path-to-pioran-periodicity>
+ROOT=<root> N_WORKERS=<8-10> CONDA_ENV=pioran-periodicity \
+    nohup bash scripts/orchestrate_campaign.sh > "<root>/orchestrator_stdout.log" 2>&1 &
+disown
+```
+
+Either way, `<N_WORKERS>` should be your full 8-10 CPUs — the orchestrator
+runs campaigns one at a time, so there's no benefit to splitting cores
+across simultaneous campaigns, and running each to completion first means
+results for earlier campaigns land sooner rather than all six trickling in
+together.
+
+**If the machine or the orchestrator process itself dies** (not the
+individual fit workers, which already self-heal via `run_workers.sh`'s own
+100-restart loop) — just rerun the exact same command again. Verified
+locally: a full rerun after everything already finished completes in the
+same second, because `run_sim.py` skips every already-cached light curve
+and already-written result file. There's no "where did it leave off"
+bookkeeping to do by hand.
+
+**Under the hood**, each campaign is one `run_workers.sh` call; if you ever
+want to (re)launch just one campaign manually instead of the whole
+orchestrator (e.g. to reprioritize), here's the equivalent for the ZTF
+signal case — see `orchestrate_campaign.sh`'s `CAMPAIGNS` array for the
+other five (each campaign gets its OWN `$ROOT/simulations/<name>/`
+directory; don't point two campaigns at the same one):
+
+```bash
+MODELS=drw,obpl CADENCE_LIBRARY=$ROOT/cadence_library \
+bash scripts/run_workers.sh "$ROOT/simulations/ztf_real_cadence_signal_case" \
+    "$ROOT/scenario_csvs/ztf_real_cadence_signal_case.csv" <N_WORKERS>
+```
+
 `ENFORCE_LEAKAGE` defaults to `false` in `run_workers.sh` (documented there
 for the *original* NumofWINDOW=20 campaign, which needed the override at
-the old N_SAMPLES); pass `true` explicitly for `original_cadence_longsim`
-as shown above, now that the longer simulation actually clears the margin.
-The two `*_real_cadence_*` campaigns don't need `ENFORCE_LEAKAGE` or
-`N_SAMPLES` set at all — `cadence_source` rows pick the longer simulation
-length and the margin check passes automatically (verified locally).
-
-Each `run_workers.sh` call launches `<N_WORKERS>` detached, crash-restarting
-workers and returns immediately (`nohup`+`disown`) — safe to run repeatedly
-or after any crash; cached `.npz` light curves and per-fit result JSONs are
-skipped on restart.
+the old N_SAMPLES) — the orchestrator already passes `true` explicitly for
+`original_cadence_longsim`, now that the longer simulation clears the
+margin; the `*_real_cadence_*` campaigns don't need it touched at all.
 
 ## 4. Runtime estimate (measured, not guessed)
 
@@ -161,17 +163,26 @@ Drilling Field object each real-cadence pool picked up).
 ## 5. Monitoring
 
 ```bash
-# fit-result files so far (each fully-fit row -> 4 files: drw, drw_sine, obpl, obpl_sine)
-ls $SIMS/ztf_real_cadence_signal_case/results/ | wc -l
+# overall progress: which campaign is running/done, since when
+tail -20 $ROOT/orchestrator.log
+
+# fit-result files so far for the campaign in progress (each fully-fit row
+# -> 4 files: drw, drw_sine, obpl, obpl_sine)
+ls $ROOT/simulations/ztf_real_cadence_signal_case/results/ | wc -l
 
 # tail a worker's log
-tail -f $SIMS/ztf_real_cadence_signal_case/logs/sim_ztf_real_cadence_signal_case_w0.log
+tail -f $ROOT/simulations/ztf_real_cadence_signal_case/logs/sim_ztf_real_cadence_signal_case_w0.log
 ```
 
-`grep -L DONE ... /logs/*.log` after all workers report `finished cleanly`
-would indicate an incomplete worker (hit the 100-restart giveup limit) --
-investigate that worker's log rather than assuming the campaign is done
-just because the launcher returned.
+If `orchestrator.log` shows a campaign was "finished" unusually fast, check
+that campaign's worker logs for `giving up after 100 restarts` rather than
+`finished cleanly` — that means a worker kept crashing on the same row
+(genuine bug, not resolved by restarting) and the orchestrator moved on
+anyway, since it only checks for a terminal state, not which one:
+
+```bash
+grep -L "finished cleanly" $ROOT/simulations/*/logs/*.log
+```
 
 ## 6. Not part of this campaign
 
