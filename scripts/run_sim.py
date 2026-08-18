@@ -63,6 +63,7 @@ from pioran_periodicity.cadence import CadenceLibrary
 from pioran_periodicity.inference import SamplerSettings, run_nested, save_result
 from pioran_periodicity.kernels import FrequencyBand, psd_approximation_error
 from pioran_periodicity.means import sine_mean
+from pioran_periodicity.multiband import BandEncoding, power_law_band_amplitudes
 from pioran_periodicity.simulate import (
     sample_real_cadence,
     sample_seasonal_pattern,
@@ -145,6 +146,25 @@ def has_real_cadence(row) -> bool:
     return "cadence_source" in row.index and pd.notna(row["cadence_source"])
 
 
+def band_amp_beta(row):
+    """Colour-dependence index for this row, or None for no colour dependence.
+
+    ``band_amp_beta`` is an optional CSV column: per-band variability
+    amplitudes are ``a_b = (lambda_b / lambda_ref) ** (-beta)``, so beta = 0
+    means every band sees identical flux -- exactly what the simulator did
+    before multi-band support. A CSV that omits the column, or leaves it
+    blank, is simulated the old way and its cached light curves stay
+    byte-identical (no ``band`` array saved, global-median centring).
+
+    Note beta = 0 is NOT the same as omitting the column: beta = 0 still
+    records band identities and centres on the reference band, giving a
+    genuine multi-band null case to fit.
+    """
+    if "band_amp_beta" not in row.index or pd.isna(row["band_amp_beta"]):
+        return None
+    return float(row["band_amp_beta"])
+
+
 def simulate_or_load(
     row, lc_dir, enforce_leakage_margin=True, cadence_lib=None, n_samples_override=None
 ):
@@ -166,9 +186,13 @@ def simulate_or_load(
     path = os.path.join(lc_dir, f"{lc_id}.npz")
     if os.path.exists(path):
         d = np.load(path)
-        return d["t"], d["y"], d["yerr"]
+        # `band` is absent from light curves cached before multi-band support
+        band = d["band"] if "band" in d.files else None
+        return d["t"], d["y"], d["yerr"], band
 
     cadence_source = row["cadence_source"] if has_real_cadence(row) else None
+    beta = None
+    encoding = None
     if n_samples_override is not None:
         n_samples = n_samples_override
     else:
@@ -198,16 +222,28 @@ def simulate_or_load(
                 f"--cadence-library was given"
             )
         survey, object_id = str(cadence_source).split(":", 1)
-        t, y, yerr = sample_real_cadence(
+        cadence = cadence_lib.get(survey, object_id)
+        beta = band_amp_beta(row)
+        band_amp = None
+        if beta is not None:
+            encoding = BandEncoding.from_counts(cadence["band"].to_numpy(dtype=object))
+            band_amp = power_law_band_amplitudes(
+                encoding.names, beta, encoding.reference, survey=survey
+            )
+        out = sample_real_cadence(
             lc,
-            cadence_lib.get(survey, object_id),
+            cadence,
             noise_model=cadence_lib.noise_models.get(survey),
             ref_mag=float(row["ref_mag"]),
             mean_signal=true_mean_signal(row),
             leakage_margin=10.0,
             enforce_leakage_margin=enforce_leakage_margin,
             seed=int(row["sampleSEED"]),
+            band_amp=band_amp,
+            return_band=beta is not None,
         )
+        band = out[3] if beta is not None else None
+        t, y, yerr = out[0], out[1], out[2]
     else:
         t, y, yerr = sample_seasonal_pattern(
             lc,
@@ -223,8 +259,15 @@ def simulate_or_load(
             enforce_leakage_margin=enforce_leakage_margin,
             seed=int(row["sampleSEED"]),
         )
+        band = None
     t = t - t[0]
-    y = y - np.median(y)
+    if band is None:
+        y = y - np.median(y)
+    else:
+        # centre on the REFERENCE band's own median, generalising the
+        # single-band convention so the fitted model's pinned mu_ref = 0 is
+        # valid by construction (see multiband.cadence_to_multiband_series)
+        y = y - np.median(y[band == encoding.reference])
 
     os.makedirs(lc_dir, exist_ok=True)
     np.savez(
@@ -244,8 +287,10 @@ def simulate_or_load(
         simSEED=int(row["simSEED"]),
         sampleSEED=int(row["sampleSEED"]),
         n_points=len(t),
+        band_amp_beta=beta if cadence_source is not None else np.nan,
+        **({} if band is None else {"band": band.astype(str)}),
     )
-    return t, y, yerr
+    return t, y, yerr, band
 
 
 def obpl_components(t):
@@ -261,20 +306,27 @@ def obpl_components(t):
     return band, n, err
 
 
-def build_models(t, cfg, want=("drw", "carma", "obpl")):
-    """Return {file_model_name: ModelSpec} for the requested noise families."""
+def build_models(t, cfg, want=("drw", "carma", "obpl"), photometric_bands=None):
+    """Return {file_model_name: ModelSpec} for the requested noise families.
+
+    ``photometric_bands`` (non-reference band names, ``BandEncoding.others``
+    order) builds multi-band models with per-band ``a_b``/``mu_b``; None
+    (default) builds ordinary single-band models, unchanged.
+    """
     families = {}
     n_comp = None
+    mb = {"photometric_bands": photometric_bands}
     if "drw" in want:
-        families["drw"] = pp.build_family("drw", cfg, variants=("plain", "sine"))
+        families["drw"] = pp.build_family("drw", cfg, variants=("plain", "sine"), **mb)
     if "carma" in want:
         families["carma"] = pp.build_family(
-            "carma", cfg, variants=("plain", "sine"), carma_order=(2, 1)
+            "carma", cfg, variants=("plain", "sine"), carma_order=(2, 1), **mb
         )
     if "obpl" in want:
         band, n_comp, _ = obpl_components(t)
         families["obpl"] = pp.build_family(
-            "obpl", cfg, variants=("plain", "sine"), band=band, n_components=n_comp
+            "obpl", cfg, variants=("plain", "sine"), band=band, n_components=n_comp,
+            **mb,
         )
     specs = {}
     for fam in families.values():
@@ -313,6 +365,15 @@ def main():
     ap.add_argument("--filter-value", type=float, default=0.0)
     ap.add_argument(
         "--models", default="all", help="comma list of drw,carma,obpl or 'all'"
+    )
+    ap.add_argument(
+        "--multiband",
+        action="store_true",
+        help="fit the shared-latent-process multi-band model (per-band a_b, "
+        "mu_b) instead of merging all bands into one series. Requires light "
+        "curves simulated from a CSV with a band_amp_beta column. Adds 2 free "
+        "parameters per non-reference band, which costs substantially more "
+        "sampler calls -- see scripts/REMOTE_RUN.md before a large campaign",
     )
     ap.add_argument(
         "--enforce-leakage-margin",
@@ -383,15 +444,31 @@ def main():
         if not todo:
             continue
 
-        t, y, yerr = simulate_or_load(
+        t, y, yerr, band_labels = simulate_or_load(
             row,
             args.lc_dir,
             enforce_leakage_margin=args.enforce_leakage_margin,
             cadence_lib=cadence_lib,
             n_samples_override=args.n_samples,
         )
+        # multi-band fitting only when asked for AND the light curve carries
+        # band identities (i.e. was simulated with a band_amp_beta column)
+        encoding = band_code = photometric_bands = None
+        if args.multiband:
+            if band_labels is None:
+                raise ValueError(
+                    f"--multiband given but light curve {lc_id} has no band "
+                    "labels; its CSV needs a band_amp_beta column and the "
+                    "cached .npz must be re-simulated"
+                )
+            encoding = BandEncoding.from_counts(band_labels)
+            band_code = encoding.encode(band_labels)
+            photometric_bands = encoding.others
+
         need = {fn.split("_")[0] for fn in todo}
-        specs, n_comp = build_models(t, cfg, want=need)
+        specs, n_comp = build_models(
+            t, cfg, want=need, photometric_bands=photometric_bands
+        )
 
         for fn in todo:
             spec = specs[fn]
@@ -400,7 +477,8 @@ def main():
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 result = run_nested(
-                    spec, t, y, yerr, settings=settings, show_status=False
+                    spec, t, y, yerr, settings=settings, show_status=False,
+                    band=band_code,
                 )
             result.meta.update(
                 highalpha=float(row.get("highalpha", np.nan)),
@@ -409,6 +487,11 @@ def main():
                 obpl_n_components=n_comp,
                 true_period=float(row["period"]) if "period" in row.index else None,
                 true_A1=float(row["A1"]) if "A1" in row.index else 0.0,
+                true_band_amp_beta=band_amp_beta(row),
+                reference_band=None if encoding is None else encoding.reference,
+                photometric_bands=(
+                    None if photometric_bands is None else list(photometric_bands)
+                ),
             )
             save_result(result, out_path)
             flag = "" if result.converged else " [UNCONVERGED]"

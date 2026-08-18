@@ -198,6 +198,9 @@ def sample_real_cadence(
     leakage_margin: float = 10.0,
     enforce_leakage_margin: bool = True,
     seed: int = 100,
+    band_amp=None,
+    band_mu=None,
+    return_band: bool = False,
 ):
     """Sample a REAL survey cadence (ZTF or LSST, from
     :class:`pioran_periodicity.cadence.CadenceLibrary`) from a simulated
@@ -221,8 +224,23 @@ def sample_real_cadence(
     object, not per-epoch photometry). The resulting fractional error is
     scaled by the realised light curve's own mean flux level.
 
+    ``band_amp`` / ``band_mu`` ({band: value} dicts, default None) inject
+    colour-dependent variability: ``y_b(t) = mu_b + a_b * x(t) + noise_b(t)``,
+    the same shared-latent-process model
+    ``kernels.gp_log_likelihood_multiband`` fits. ``a_b`` scales the
+    variability *about the light curve's mean level*, not the mean itself,
+    and scales the injected periodic ``mean_signal`` too (matching how the
+    fitted model treats ``mean_func``); the per-epoch photometric noise is
+    NOT scaled, since it comes from the survey's depth, not from the source.
+    Use :func:`pioran_periodicity.multiband.power_law_band_amplitudes` to
+    build ``band_amp`` from a single colour index. Both default to None,
+    which reproduces the identical-flux-in-every-band behaviour bit for bit.
+
     Returns (t_years, flux, flux_err), time sorted, in years, NOT re-zeroed
-    -- same contract as :func:`sample_seasonal_pattern`.
+    -- same contract as :func:`sample_seasonal_pattern`. With
+    ``return_band=True`` returns (t_years, flux, flux_err, band) instead,
+    where ``band`` is the (n_points,) array of per-epoch band labels; the
+    default 3-tuple keeps every existing caller working unchanged.
     """
     rng = np.random.default_rng(int(seed))
 
@@ -267,7 +285,34 @@ def sample_real_cadence(
             frac_err[sel] = noise_model(b, np.full(int(sel.sum()), ref_mag))
     flux_err = frac_err * ref_flux
 
-    flux = lc.flux[idx] + rng.normal(0.0, flux_err)
+    # (n_points,) per-epoch amplitude/offset; only built when colour
+    # dependence was actually requested, so the no-band_amp path stays
+    # bit-for-bit identical to before this parameter existed.
+    latent = lc.flux[idx]
+    if band_amp is not None:
+        missing = sorted(set(np.unique(band)) - set(band_amp))
+        if missing:
+            raise ValueError(f"band_amp has no entry for band(s) {missing}")
+        a = np.array([band_amp[b] for b in band], dtype=float)
+        # scale the VARIABILITY about the mean level, not the mean itself
+        latent = ref_flux + a * (latent - ref_flux)
+    else:
+        a = None
+
+    flux = latent + rng.normal(0.0, flux_err)
     if mean_signal is not None:
-        flux = flux + np.asarray(mean_signal(t_years), dtype=float)
+        signal = np.asarray(mean_signal(t_years), dtype=float)
+        # the fitted model divides mean_func by a_b along with the latent
+        # process (see kernels.gp_log_likelihood_multiband), so the injected
+        # periodic signal is scaled the same way -- injection and inference
+        # assume the same thing about the periodic component
+        flux = flux + (signal if a is None else a * signal)
+    if band_mu is not None:
+        missing = sorted(set(np.unique(band)) - set(band_mu))
+        if missing:
+            raise ValueError(f"band_mu has no entry for band(s) {missing}")
+        flux = flux + np.array([band_mu[b] for b in band], dtype=float)
+
+    if return_band:
+        return t_years, flux, flux_err, band
     return t_years, flux, flux_err

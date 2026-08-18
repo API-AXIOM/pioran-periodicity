@@ -100,8 +100,16 @@ def run_nested(
     n_posterior_samples: int = 10_000,
     show_status: bool = False,
     log_dir: str | None = None,
+    band=None,
 ) -> FitResult:
-    """Run ultranest on one model and return a reproducible FitResult."""
+    """Run ultranest on one model and return a reproducible FitResult.
+
+    ``band`` (integer per-point photometric-band codes, see
+    ``multiband.BandEncoding.encode``) is only meaningful when ``spec`` was
+    built with ``build_family(..., photometric_bands=...)``; otherwise it is
+    forwarded to ``spec.loglike`` and ignored there. Default ``None``
+    reproduces single-band fitting exactly as before this parameter existed.
+    """
     import ultranest  # deferred: heavy import
 
     t = np.asarray(t, dtype=np.float64)
@@ -114,7 +122,7 @@ def run_nested(
     def loglike_vec(params):
         pdict = prior.as_dict(params)
         try:
-            val = spec.loglike(pdict, t, y, yerr)
+            val = spec.loglike(pdict, t, y, yerr, band)
         except (FloatingPointError, ValueError, RuntimeError):
             return _LOW
         if not np.isfinite(val):

@@ -26,10 +26,18 @@ from .kernels import (
     carma_kernel,
     drw_kernel,
     gp_log_likelihood,
+    gp_log_likelihood_multiband,
     obpl_kernel,
 )
 from .means import combine_means, linear_mean, sine_mean
-from .priors import ConditionalUniform, Normal, Parameter, PriorTransform, Uniform
+from .priors import (
+    ConditionalUniform,
+    LogNormal,
+    Normal,
+    Parameter,
+    PriorTransform,
+    Uniform,
+)
 
 __all__ = ["PriorConfig", "ModelSpec", "ModelFamily", "build_family"]
 
@@ -79,6 +87,12 @@ class PriorConfig:
     log10_carma_beta: tuple[float, float] = (-6.5, 6.5)
     log10_carma_sigma: tuple[float, float] = (-1.3, 2.3)
 
+    # multi-band (non-reference-band) priors: a_b ~ LogNormal(0, sigma),
+    # mu_b ~ Normal(0, scale). Reference band's a_ref=1, mu_ref=0 are pinned,
+    # not fit (see multiband.BandEncoding, models._band_parameters).
+    band_log_amp_sigma: float = 0.3
+    band_mu_scale: float = 0.5
+
     def __post_init__(self):
         if self.period[0] <= 0:
             raise ValueError("period lower bound must be > 0 (fix M5)")
@@ -97,14 +111,16 @@ class PriorConfig:
 class ModelSpec:
     """A single model: parameters + log-likelihood builder.
 
-    ``loglike(params_dict, t, y, yerr)`` returns the GP log-likelihood.
-    Use with inference.run_nested, which wires in the data and adds the
-    non-finite guard.
+    ``loglike(params_dict, t, y, yerr, band=None)`` returns the GP
+    log-likelihood; ``band`` (integer per-point band codes) is only used
+    when the family was built with ``photometric_bands`` set, otherwise it
+    is accepted and ignored. Use with inference.run_nested, which wires in
+    the data and adds the non-finite guard.
     """
 
     name: str
     prior: PriorTransform
-    loglike: Callable[[dict, np.ndarray, np.ndarray, np.ndarray], float]
+    loglike: Callable[..., float]
     meta: dict = field(default_factory=dict)
 
     @property
@@ -188,6 +204,38 @@ def _mean_parameters(variant: str, cfg: PriorConfig) -> list[Parameter]:
     return params
 
 
+def _band_parameters(
+    photometric_bands: Sequence[str] | None,
+    cfg: PriorConfig,
+    fit_band_means: bool = True,
+) -> list[Parameter]:
+    """Per-band amplitude/mean parameters for non-reference bands only.
+
+    ``photometric_bands`` must be the non-reference band names in the same
+    order as ``multiband.BandEncoding.others`` -- the reference band's own
+    amplitude/mean are pinned (a_ref=1, mu_ref=0), not fit. Returns [] when
+    ``photometric_bands`` is None/empty (default), so single-band models are
+    completely unaffected.
+
+    ``fit_band_means=False`` drops the ``mu_b`` parameters, fixing every
+    band's offset to 0 and halving the parameters multi-band adds. Valid
+    only when the data really is centred per band -- true by construction
+    for injected simulation campaigns (``run_sim.py`` injects no band
+    offsets unless asked), NOT generally true for real photometry, where
+    genuine colour offsets exist and dropping mu_b would push them into the
+    residuals. Exists because sampler cost grows superlinearly in
+    dimension: for 6-band LSST this is ndim 12 -> 7 (drw).
+    """
+    if not photometric_bands:
+        return []
+    params: list[Parameter] = []
+    for b in photometric_bands:
+        params.append(Parameter(f"a_{b}", LogNormal(0.0, cfg.band_log_amp_sigma)))
+        if fit_band_means:
+            params.append(Parameter(f"mu_{b}", Normal(0.0, cfg.band_mu_scale)))
+    return params
+
+
 def _kernel_builder(
     noise: str,
     carma_order: tuple[int, int],
@@ -257,6 +305,8 @@ def build_family(
     n_components: int = 20,
     basis_function: str = "SHO",
     carma_order: tuple[int, int] = (2, 1),
+    photometric_bands: Sequence[str] | None = None,
+    fit_band_means: bool = True,
 ) -> ModelFamily:
     """Build a noise model and its mean-function variants.
 
@@ -265,17 +315,28 @@ def build_family(
     noise : "drw" | "obpl" | "carma"
     cfg : PriorConfig
     variants : subset of {"plain", "sine", "linear", "sine+linear"}
-    band : FrequencyBand, required for OBPL (fix M3: explicit, robust band)
+    band : FrequencyBand, required for OBPL (fix M3: explicit, robust band).
+        NOT the photometric band -- see ``photometric_bands`` below.
     n_components, basis_function : OBPL approximation settings
     carma_order : (p, q) for CARMA
+    photometric_bands : non-reference photometric band names (e.g. ZTF/LSST
+        filters), in ``multiband.BandEncoding.others`` order. None (default)
+        builds an ordinary single-band model, unchanged from before this
+        parameter existed. When given, every variant's loglike expects an
+        additional ``band`` array argument (integer codes from
+        ``BandEncoding.encode``) and fits per-band ``a_b``/``mu_b``
+        alongside the shared noise/mean parameters.
 
-    All variants share the SAME noise Parameter objects (fix M1/B4).
+    All variants share the SAME noise Parameter objects (fix M1/B4); when
+    ``photometric_bands`` is given they also share the SAME band Parameter
+    objects, for the same reason.
     """
     if noise == "obpl" and band is not None:
         band.check_density(n_components)  # single upfront density check (M3)
 
     noise_params = _noise_parameters(noise, cfg, carma_order)
     kernel_of = _kernel_builder(noise, carma_order, band, n_components, basis_function)
+    band_params = _band_parameters(photometric_bands, cfg, fit_band_means)
 
     err_param = (
         [Parameter("err_scale", Uniform(*cfg.err_scale))]
@@ -285,20 +346,50 @@ def build_family(
 
     members: dict[str, ModelSpec] = {}
     for variant in variants:
-        params = list(noise_params) + _mean_parameters(variant, cfg) + list(err_param)
+        params = (
+            list(noise_params)
+            + list(band_params)
+            + _mean_parameters(variant, cfg)
+            + list(err_param)
+        )
         prior = PriorTransform(params)
         mean_of = _mean_builder(variant)
 
-        def loglike(pdict, t, y, yerr, _kernel_of=kernel_of, _mean_of=mean_of):
+        def loglike(
+            pdict,
+            t,
+            y,
+            yerr,
+            band=None,
+            _kernel_of=kernel_of,
+            _mean_of=mean_of,
+            _photometric_bands=photometric_bands,
+        ):
             kernel = _kernel_of(pdict)
             mean_func = _mean_of(pdict)
-            return gp_log_likelihood(
+            err_scale = pdict.get("err_scale", 1.0)
+            if band is None:
+                return gp_log_likelihood(
+                    kernel, t, y, yerr, mean_func=mean_func, err_scale=err_scale,
+                )
+            # (n_bands,), index 0 is the pinned reference band (a=1, mu=0)
+            band_amp = np.array(
+                [1.0] + [pdict[f"a_{b}"] for b in _photometric_bands]
+            )
+            band_mu = np.array(
+                [0.0]
+                + [pdict.get(f"mu_{b}", 0.0) for b in _photometric_bands]
+            )
+            return gp_log_likelihood_multiband(
                 kernel,
                 t,
                 y,
                 yerr,
+                band,
+                band_amp,
+                band_mu,
                 mean_func=mean_func,
-                err_scale=pdict.get("err_scale", 1.0),
+                err_scale=err_scale,
             )
 
         name = noise if variant == "plain" else f"{noise}+{variant}"
@@ -322,6 +413,10 @@ def build_family(
                     }
                 ),
                 "carma_order": carma_order if noise == "carma" else None,
+                "photometric_bands": (
+                    list(photometric_bands) if photometric_bands else None
+                ),
+                "fit_band_means": bool(fit_band_means) if photometric_bands else None,
             },
         )
     return ModelFamily(noise=noise, members=members)

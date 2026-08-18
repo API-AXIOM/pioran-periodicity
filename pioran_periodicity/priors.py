@@ -27,6 +27,7 @@ __all__ = [
     "Uniform",
     "Normal",
     "LogUniform",
+    "LogNormal",
     "ConditionalUniform",
     "Parameter",
     "PriorTransform",
@@ -92,6 +93,30 @@ class LogUniform(Distribution):
 
     def describe(self):
         return f"LogUniform({self.lo}, {self.hi})"
+
+
+@dataclass(frozen=True)
+class LogNormal(Distribution):
+    """Normal in log10, positive support; returns the linear value.
+
+    ``mu_log10=0`` gives a prior median of exactly 1 -- the convention used
+    for per-band amplitude scales pinned to 1 at the reference band (see
+    multiband module), so a non-reference band's amplitude prior is centered
+    on "same variability amplitude as the reference band" by default.
+    """
+
+    mu_log10: float
+    sigma_log10: float
+
+    def __post_init__(self):
+        if self.sigma_log10 <= 0:
+            raise ValueError("LogNormal requires sigma_log10 > 0")
+
+    def transform(self, u, previous):
+        return 10.0 ** (self.mu_log10 + self.sigma_log10 * _scipy_norm.ppf(u))
+
+    def describe(self):
+        return f"LogNormal(mu_log10={self.mu_log10}, sigma_log10={self.sigma_log10})"
 
 
 @dataclass(frozen=True)

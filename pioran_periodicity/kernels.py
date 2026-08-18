@@ -45,6 +45,7 @@ __all__ = [
     "carma_kernel",
     "psd_approximation_error",
     "gp_log_likelihood",
+    "gp_log_likelihood_multiband",
     "MIN_COMPONENTS_PER_DECADE",
 ]
 
@@ -321,3 +322,54 @@ def gp_log_likelihood(
     gp = pa.ScalableGP(0.0, kernel)
     gp_cond = gp(t, sigma2)
     return float(pa.Pioran.logpdf(gp_cond, y))
+
+
+def gp_log_likelihood_multiband(
+    kernel,
+    t,
+    y,
+    yerr,
+    band,
+    band_amp,
+    band_mu,
+    mean_func=None,
+    err_scale: float = 1.0,
+) -> float:
+    """Multi-band GP log-likelihood via the rescale trick.
+
+    Shared-latent-process model: ``y_b(t) = mu_b + a_b * x(t) + noise_b(t)``,
+    ``x(t)`` a single zero-mean GP shared across bands (ZTF/LSST never
+    observe two bands at once, so this is a per-point scalar rescale, not a
+    true multivariate GP). ``Cov(y_i, y_j) = a_bi * a_bj * k(t_i, t_j)`` is a
+    diagonal similarity transform of the unit-amplitude covariance, so this
+    reuses :func:`gp_log_likelihood` unmodified on the rescaled residuals
+    and adds the linear-rescale Jacobian ``-sum(log(a_b))`` (validated
+    2026-08-14 against a brute-force dense-covariance reference, 1e-6 to
+    1e-10 relative tolerance).
+
+    ``band``, ``t``, ``y``, ``yerr`` are 1-D arrays of equal length
+    n_points (one entry per data point). ``band`` holds integer codes
+    (see ``multiband.BandEncoding.encode``) indexing ``band_amp``/
+    ``band_mu``, 1-D arrays of length n_bands with ``band_amp[0] == 1.0``,
+    ``band_mu[0] == 0.0`` for the pinned reference band (index 0).
+
+    ``mean_func`` (sine/linear periodic signal) is evaluated in
+    shared-latent-process units and is therefore rescaled per band by the
+    same division as ``x(t)`` -- deliberate, not a separate per-band
+    amplitude parameter for the periodic component.
+    """
+    band = np.asarray(band, dtype=np.int64)
+    band_amp = np.asarray(band_amp, dtype=np.float64)
+    band_mu = np.asarray(band_mu, dtype=np.float64)
+    a = band_amp[band]  # (n_points,), per-point amplitude via band code lookup
+    mu = band_mu[band]  # (n_points,), per-point mean offset via band code lookup
+
+    r = np.asarray(y, dtype=np.float64) - mu
+    if mean_func is not None:
+        r = r - np.asarray(mean_func(t), dtype=np.float64)
+
+    ll = gp_log_likelihood(
+        kernel, t, r / a, np.asarray(yerr, dtype=np.float64) / a,
+        mean_func=None, err_scale=err_scale,
+    )
+    return ll - float(np.sum(np.log(a)))
