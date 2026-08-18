@@ -29,6 +29,9 @@
 #                  their own longer default automatically)
 #   CONDA_ENV      conda environment to run in (default: pioran-periodicity,
 #                  matching docs/installation.md)
+#   MULTIBAND      true/false, passes run_sim.py --multiband (default: false
+#                  -- only meaningful against a band_amp_beta CSV; see
+#                  scripts/REMOTE_RUN.md before a large multiband campaign)
 #
 # Usage (from anywhere; launches all workers detached, then returns):
 #   ./run_workers.sh <data-dir> <csv-path> <n-workers>
@@ -50,6 +53,7 @@ ENFORCE_LEAKAGE="${ENFORCE_LEAKAGE:-false}"
 CADENCE_LIBRARY="${CADENCE_LIBRARY:-}"
 N_SAMPLES="${N_SAMPLES:-}"
 CONDA_ENV="${CONDA_ENV:-pioran-periodicity}"
+MULTIBAND="${MULTIBAND:-false}"
 
 case "$CSV" in
     /*) CSV_PATH="$CSV" ;;
@@ -79,6 +83,7 @@ if [ $# -ge 4 ]; then
     )
     [ -n "$CADENCE_LIBRARY" ] && ARGS+=(--cadence-library "$CADENCE_LIBRARY")
     [ -n "$N_SAMPLES" ] && ARGS+=(--n-samples "$N_SAMPLES")
+    [ "$MULTIBAND" = "true" ] && ARGS+=(--multiband)
     n=0
     while true; do
         conda run -n "$CONDA_ENV" python "$SCRIPT_DIR/run_sim.py" "${ARGS[@]}" \
@@ -103,4 +108,4 @@ for ((I = 0; I < NWORKERS; I++)); do
     nohup "$0" "$DATA" "$CSV" "$NWORKERS" "$I" </dev/null >/dev/null 2>&1 &
     disown
 done
-echo "Launched $NWORKERS workers (models=$MODELS, env=$CONDA_ENV) against $CSV_PATH (logs: $DATA/logs/sim_${TAG}_w*.log)"
+echo "Launched $NWORKERS workers (models=$MODELS, multiband=$MULTIBAND, env=$CONDA_ENV) against $CSV_PATH (logs: $DATA/logs/sim_${TAG}_w*.log)"

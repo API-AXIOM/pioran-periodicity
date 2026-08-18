@@ -69,6 +69,12 @@ CSV_COLUMNS = [
     "sharpness", "period", "A1", "cadence_source", "ref_mag",
 ]
 
+# Optional multi-band colour column: run_sim.py's band_amp_beta(row) reads
+# it if present (falls back to a merged single-band fit if absent), so
+# adding it here is the only change needed to produce a --multiband-ready
+# scenario CSV.
+CSV_COLUMNS_MULTIBAND = CSV_COLUMNS + ["band_amp_beta"]
+
 
 def parse_period_a1(specs: list[str]) -> dict[float, list[float]]:
     out = {}
@@ -106,12 +112,16 @@ def pick_stratified_objects(master_csv: str, n_objects: int, seed: int) -> pd.Da
     return matched.loc[picked_ids, cols].reset_index(drop=True)
 
 
-def build_rows(highalpha, period_a1, objects, first_id, seed, survey, fixed):
+def build_rows(highalpha, period_a1, objects, first_id, seed, survey, fixed,
+                band_amp_beta=None):
     """Generate rows. ``objects`` (a DataFrame from pick_stratified_objects)
     supplies both the rep count (len(objects)) and, via ``rep`` as the row
     index, WHICH real cadence each rep uses -- identically across every
     (highalpha, period, A1) cell, for direct cell-for-cell comparability
-    against the synthetic-cadence campaigns."""
+    against the synthetic-cadence campaigns.
+
+    ``band_amp_beta``, if given, is stamped as a constant column on every
+    row (see CSV_COLUMNS_MULTIBAND)."""
     n_per_cell = len(objects)
     rng = np.random.default_rng(seed)
     sim_seeds = rng.integers(1, 100_000, size=n_per_cell)
@@ -127,19 +137,20 @@ def build_rows(highalpha, period_a1, objects, first_id, seed, survey, fixed):
     for ha in highalpha:
         for period, a1 in cells:
             for rep, obj in objects.iterrows():
-                rows.append(
-                    dict(
-                        ID=lc_id,
-                        simSEED=int(sim_seeds[rep]),
-                        sampleSEED=int(sample_seeds[rep]),
-                        highalpha=ha,
-                        period=period,
-                        A1=a1,
-                        cadence_source=f"{survey}:{obj['object_id']}",
-                        ref_mag=float(obj["rmag"]),
-                        **fixed,
-                    )
+                row = dict(
+                    ID=lc_id,
+                    simSEED=int(sim_seeds[rep]),
+                    sampleSEED=int(sample_seeds[rep]),
+                    highalpha=ha,
+                    period=period,
+                    A1=a1,
+                    cadence_source=f"{survey}:{obj['object_id']}",
+                    ref_mag=float(obj["rmag"]),
+                    **fixed,
                 )
+                if band_amp_beta is not None:
+                    row["band_amp_beta"] = band_amp_beta
+                rows.append(row)
                 lc_id += 1
     return rows, lc_id
 
@@ -176,6 +187,12 @@ def main():
     )
     ap.add_argument("--first-id", type=int, default=0)
     ap.add_argument("--seed", type=int, default=20260728)
+    ap.add_argument(
+        "--band-amp-beta", type=float, default=None,
+        help="if given, stamp a constant band_amp_beta column (per-band "
+        "variability colour index) on every row, producing a "
+        "--multiband-ready CSV; omit for a merged single-band CSV",
+    )
     for col, default in FIXED_DEFAULTS.items():
         ap.add_argument(f"--{col}", type=type(default), default=default)
     args = ap.parse_args()
@@ -206,9 +223,11 @@ def main():
         )
 
     rows, next_id = build_rows(
-        highalpha, period_a1, objects, args.first_id, args.seed, args.survey, fixed
+        highalpha, period_a1, objects, args.first_id, args.seed, args.survey, fixed,
+        band_amp_beta=args.band_amp_beta,
     )
-    df = pd.DataFrame(rows)[CSV_COLUMNS]
+    columns = CSV_COLUMNS_MULTIBAND if args.band_amp_beta is not None else CSV_COLUMNS
+    df = pd.DataFrame(rows)[columns]
     df.to_csv(args.out, index=False)
 
     n_cells = len(highalpha) * (

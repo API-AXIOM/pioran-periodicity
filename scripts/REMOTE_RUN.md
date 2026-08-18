@@ -198,3 +198,61 @@ Aggregation (`scripts/aggregate_results.py`) and plotting
 these results once they land, the same way they work against
 `signal_case`/`null_case` -- not run here, since the campaign itself hasn't
 run yet.
+
+## 7. Multi-band FP (null) campaign -- staged, priority
+
+A second, separate campaign validating the multi-band model
+(`pioran_periodicity.multiband`, shared-latent-process rescale trick) on
+real ZTF/LSST cadences -- FPR calibration only for now (the analogous
+detection-power/signal campaign is built, see below, but deliberately not
+launched yet). Same real-cadence pools and highalpha convention as
+sections 1-6, plus a fixed `band_amp_beta=0.35` column (one realistic
+colour contrast; `run_sim.py`'s `--multiband` reads this column
+automatically) and `--multiband` passed to every fit.
+
+**Additional rsync**: `scenario_csvs/{ztf,lsst}_multiband_null_case.csv`
+(100 reps/cell, 3 highalpha x 100 = 300 rows each) and their `_n20.csv`
+stage-1 subsets (20 reps/cell, 60 rows each -- the first 20 rows of every
+highalpha block, so extending to the full 100 later just means re-pointing
+at the full CSV; already-fit IDs are skipped, not redone). IDs 70000+
+(ZTF) / 80000+ (LSST), clear of every existing range (which tops out at
+66399).
+
+**Launch** (STAGE=n20 by default -- do NOT set STAGE=full until the n20
+stage has actually finished and you've confirmed the real per-LC cost):
+
+```
+*/5 * * * * ROOT=<root> N_WORKERS=<see below> CONDA_ENV=pioran-periodicity \
+    bash <path-to-pioran-periodicity>/scripts/campaign_tick_multiband.sh \
+    >> <root>/tick_multiband_cron.log 2>&1
+```
+
+Progress: `$ROOT/orchestrator_multiband.log`. This is a separate cron
+line/script from section 3's `campaign_tick.sh` -- the two campaigns are
+independent and can run concurrently if the box has the cores, or
+sequentially if not (just don't set N_WORKERS so high across both that
+they starve each other).
+
+**Cost (measured 2026-08-18, LSST 6-band + mu_b, one object)**: DRW
+combined (drw+drw_sine) 34.6 min/LC, OBPL combined (obpl+obpl_sine) 141.8
+min/LC -- **all four models together ~176 min/LC**. ZTF is unmeasured but
+expected much cheaper (ZTF's DRW multiband was only 1.9x its merged-fit
+cost, vs LSST's much steeper per-dimension scaling). LSST dominates
+sizing: the n20 stage is 60 LSST LCs, ~176 core-hours --
+
+| N_WORKERS | wall time (LSST n20 stage) |
+|---|---|
+| 10 | ~17.6 hr |
+| 20 | ~8.8 hr |
+| 30 | ~5.9 hr |
+
+Extending to the full 100/cell later (300 LSST LCs) is ~880 core-hours
+(~22-44 hr at 20-40 workers).
+
+**Signal campaign (built, NOT launched)**: same treatment,
+`scenario_csvs/{ztf,lsst}_multiband_signal_case.csv`, IDs 71000+ (ZTF) /
+81000+ (LSST), 27 cells (3 highalpha x 3 periods x 3 A1) x 100 reps = 2700
+rows each -- 9x the null campaign's cell count. Not added to any cron
+script. Launching this is a deliberate follow-on decision once the null
+campaign's actual (not probe) cost is in hand, not something to start
+alongside it.
