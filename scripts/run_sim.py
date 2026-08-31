@@ -400,6 +400,26 @@ def main():
         "synthetic-window CSV at a longer length to fix a leakage-margin "
         "violation (S1) its default N_SAMPLES doesn't clear.",
     )
+    ap.add_argument(
+        "--max-ncalls",
+        type=int,
+        default=1_000_000,
+        help="ultranest likelihood-call cap per fit. The default suffices for "
+        "single-band and ZTF multi-band models, but NOT for 6-band LSST "
+        "multi-band fits (12-17 dimensions), which need 2.7M-4.9M and are "
+        "silently truncated at the default -- producing a logz that is not an "
+        "evidence estimate. Use ~8000000 with --multiband on LSST cadences.",
+    )
+    ap.add_argument(
+        "--checkpoint-dir",
+        default=None,
+        help="enable ultranest on-disk checkpointing under this directory "
+        "(one subdirectory per lc_id/model). Makes a fit truncated by "
+        "--max-ncalls resumable: rerunning with a larger cap continues the "
+        "existing integration instead of restarting it. Costs disk, but for "
+        "long multi-band fits it is the difference between extending a run "
+        "and throwing it away.",
+    )
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -431,7 +451,7 @@ def main():
         want_files |= {v for k, v in MODEL_FILE_NAMES.items() if k.split("+")[0] == m}
 
     settings_base = dict(
-        min_num_live_points=400, frac_remain=0.01, max_ncalls=1_000_000
+        min_num_live_points=400, frac_remain=0.01, max_ncalls=args.max_ncalls
     )
 
     for _, row in picked.iterrows():
@@ -474,11 +494,19 @@ def main():
             spec = specs[fn]
             out_path = os.path.join(args.out_dir, f"{lc_id}_{fn}.json")
             settings = SamplerSettings(seed=fit_seed(lc_id, fn), **settings_base)
+            fit_log_dir = None
+            if args.checkpoint_dir:
+                fit_log_dir = os.path.join(args.checkpoint_dir, f"{lc_id}_{fn}")
+                os.makedirs(fit_log_dir, exist_ok=True)
             with warnings.catch_warnings():
+                # ultranest is noisy, but never swallow our own convergence
+                # warning -- that suppression is why the 2026-08 LSST
+                # multi-band truncation went unnoticed for a week
                 warnings.simplefilter("ignore")
+                warnings.filterwarnings("always", message=r".*posterior ESS.*")
                 result = run_nested(
                     spec, t, y, yerr, settings=settings, show_status=False,
-                    band=band_code,
+                    band=band_code, log_dir=fit_log_dir,
                 )
             result.meta.update(
                 highalpha=float(row.get("highalpha", np.nan)),

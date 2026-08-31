@@ -26,6 +26,9 @@ Changelog = "https://github.com/dhuppenkothen/pioran-periodicity/blob/main/CHANG
 
 [project.optional-dependencies]
 simulation = ["stingray"]
+# ultranest's on-disk checkpointing (run_nested(log_dir=...), run_sim.py
+# --checkpoint-dir) needs h5py; without it only non-resumable fits work
+checkpoint = ["h5py"]
 test = ["pytest"]
 dev = ["black", "flake8", "isort", "pre-commit"]
 docs = ["mkdocs-material", "mkdocstrings[python]"]

@@ -101,6 +101,7 @@ def run_nested(
     show_status: bool = False,
     log_dir: str | None = None,
     band=None,
+    resume: str = "resume",
 ) -> FitResult:
     """Run ultranest on one model and return a reproducible FitResult.
 
@@ -109,6 +110,21 @@ def run_nested(
     built with ``build_family(..., photometric_bands=...)``; otherwise it is
     forwarded to ``spec.loglike`` and ignored there. Default ``None``
     reproduces single-band fitting exactly as before this parameter existed.
+
+    ``log_dir`` turns on ultranest's on-disk checkpointing, and is what makes
+    a run truncated by ``max_ncalls`` *extendable*: rerunning the same fit
+    with a larger cap continues the existing integration instead of starting
+    over. Without it ultranest keeps nothing, so a truncated fit can only be
+    redone from scratch -- which is how the 2026-08 LSST multi-band campaign
+    lost ~840 core-hours of unusable truncated fits. Strongly recommended for
+    any fit expected to take more than a few minutes.
+
+    ``resume`` is ultranest's policy for an existing ``log_dir``; it has no
+    effect when ``log_dir`` is None. The default ``"resume"`` continues a
+    previous run and errors if the run it finds used a different model, which
+    is the safe behaviour for extending a truncated campaign fit. Pass
+    ``"overwrite"`` to discard any existing checkpoint, or ``"resume-similar"``
+    if the likelihood has changed and you accept the approximation.
     """
     import ultranest  # deferred: heavy import
 
@@ -134,7 +150,7 @@ def run_nested(
         loglike_vec,
         lambda cube: prior(cube),
         log_dir=log_dir,
-        resume="overwrite",
+        resume=resume,
     )
     # Slice sampling for higher-dimensional problems: region rejection
     # sampling stalls there (see SamplerSettings docstring).
