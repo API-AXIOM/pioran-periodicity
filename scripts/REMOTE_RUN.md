@@ -287,7 +287,19 @@ Pool: 100 (null) / 50 (signal) stratified WFD objects, 107–808 epochs.
 Grids are otherwise **identical** to the §7 CSVs — only the object pool
 differs — so results remain comparable cell for cell.
 
-### Launch — null campaign
+### Conda environment — differs by machine
+
+`run_workers.sh` defaults `CONDA_ENV` to **`pioran-periodicity`**, which is
+the name on the remote box (`spexaitrain`) and matches
+`docs/installation.md`. The **local** MacBook's env is called
+`periodicity313` instead. So: set `CONDA_ENV=periodicity313` for local runs,
+and **omit it entirely on the remote**. Setting a nonexistent env is not a
+fast, obvious failure — `conda run` errors, `run_sim.py` never prints
+`DONE`, and each worker's supervisor loops the failure up to 100 times at
+10 s intervals before giving up, so it looks like a launched campaign that
+is producing nothing.
+
+### Launch — null campaign (local machine)
 
 ```bash
 cd ~/work/repositories/pioran-periodicity
@@ -301,21 +313,26 @@ CONDA_ENV=periodicity313 \
 ./scripts/run_workers.sh $OUT $D/scenario_csvs/lsst_wfd_multiband_null_case.csv 12
 ```
 
-### Launch — signal campaign
+### Launch — signal campaign (remote machine)
 
-Same, with the signal CSV and its own output directory:
+Same, with the signal CSV and its own output directory. **No `CONDA_ENV`
+line** — the remote default (`pioran-periodicity`) is already correct:
 
 ```bash
+cd ~/repositories/pioran-periodicity
+D=~/data/quasar_cadences
 OUT=$D/simulations/lsst_wfd_multiband_signal_case
 
 MODELS=drw MULTIBAND=true MAX_NCALLS=8000000 \
 CHECKPOINT_DIR=$OUT/checkpoints \
 CADENCE_LIBRARY=$D/cadence_library \
-CONDA_ENV=periodicity313 \
 ./scripts/run_workers.sh $OUT $D/scenario_csvs/lsst_wfd_multiband_signal_case.csv <N_WORKERS>
 ```
 
-### Optional: OBPL control
+Confirm the echoed `env=` in the launch line is the environment you meant
+before walking away.
+
+### Optional: OBPL control (local machine)
 
 OBPL is ~3.5× DRW's cost and has returned FPR 0% in every cell of every
 campaign so far, so it runs as a 20-rep control rather than on the full
