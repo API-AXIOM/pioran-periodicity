@@ -84,17 +84,38 @@ def parse_period_a1(specs: list[str]) -> dict[float, list[float]]:
     return out
 
 
-def pick_stratified_objects(master_csv: str, n_objects: int, seed: int) -> pd.DataFrame:
+def pick_stratified_objects(
+    master_csv: str, n_objects: int, seed: int, max_n_epochs: int | None = None
+) -> pd.DataFrame:
     """A fixed, reproducible pool of ``n_objects`` matched targets, spread
     evenly across quartiles of ``n_epochs`` (so sparse- and densely-sampled
     real cadences are both represented, not just whichever happens to sort
-    first). Returns columns object_id, rmag, n_epochs, baseline_days."""
+    first). Returns columns object_id, rmag, n_epochs, baseline_days.
+
+    ``max_n_epochs`` drops objects above that epoch count BEFORE stratifying,
+    so the quartiles are computed within the surviving population rather than
+    spending one whole quartile on the excluded tail. For LSST this is how
+    you get a Wide-Fast-Deep-only pool: the deep-drilling fields are a
+    separate population (47 objects, 690-47950 epochs) and the WFD ceiling is
+    887, with NO object anywhere between 887 and 2360 -- so any cut in that
+    gap (1000 is the natural one) separates them exactly. Mixing the two
+    makes "LSST" a blend of survey strategies differing ~30x in sampling
+    density, and lands ~45% of the campaign's cost on a handful of objects.
+    """
     master = pd.read_csv(master_csv)
     matched = master[master["matched"]].copy()
+    if max_n_epochs is not None:
+        n_before = len(matched)
+        matched = matched[matched["n_epochs"] <= max_n_epochs]
+        print(
+            f"--max-n-epochs {max_n_epochs}: kept {len(matched)} of "
+            f"{n_before} matched targets"
+        )
     if len(matched) < n_objects:
         raise ValueError(
-            f"{master_csv} has only {len(matched)} matched targets, "
-            f"need {n_objects}"
+            f"{master_csv} has only {len(matched)} matched targets"
+            + (f" at n_epochs <= {max_n_epochs}" if max_n_epochs else "")
+            + f", need {n_objects}"
         )
 
     matched["_quartile"] = pd.qcut(matched["n_epochs"], 4, labels=False, duplicates="drop")
@@ -188,6 +209,13 @@ def main():
     ap.add_argument("--first-id", type=int, default=0)
     ap.add_argument("--seed", type=int, default=20260728)
     ap.add_argument(
+        "--max-n-epochs", type=int, default=None,
+        help="drop objects with more than this many epochs from the pool "
+        "before stratifying. For LSST use 1000 to get a Wide-Fast-Deep-only "
+        "pool: WFD tops out at 887 epochs and the deep-drilling fields start "
+        "at 2360, so any cut in that empty gap separates them exactly",
+    )
+    ap.add_argument(
         "--band-amp-beta", type=float, default=None,
         help="if given, stamp a constant band_amp_beta column (per-band "
         "variability colour index) on every row, producing a "
@@ -214,7 +242,9 @@ def main():
         args.period_a1 or PERIOD_A1_DEFAULT
     )
 
-    objects = pick_stratified_objects(args.master_csv, args.n_per_cell, args.seed)
+    objects = pick_stratified_objects(
+        args.master_csv, args.n_per_cell, args.seed, args.max_n_epochs
+    )
     missing = set(objects["object_id"]) - set(lib.object_ids(args.survey))
     if missing:
         raise ValueError(
