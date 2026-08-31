@@ -16,9 +16,13 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from aggregate_results import build_table  # noqa: E402
 
 
-def _write_result(results_dir, lc_id, model, logz, meta):
+def _write_result(results_dir, lc_id, model, logz, meta, converged=None):
+    """``converged=None`` writes a legacy-style JSON with no such key."""
+    payload = {"model": model, "logz": logz, "meta": meta}
+    if converged is not None:
+        payload["converged"] = converged
     with open(os.path.join(results_dir, f"{lc_id}_{model}.json"), "w") as f:
-        json.dump({"model": model, "logz": logz, "meta": meta}, f)
+        json.dump(payload, f)
 
 
 @pytest.fixture
@@ -86,3 +90,70 @@ def test_build_table_from_config_csv_still_works(tmp_path):
     table = build_table(str(d), group_cols=["highalpha"], config_csv=str(csv_path))
     assert set(table) == {"highalpha=-3"}
     assert table["highalpha=-3"]["DRW"]["outcomes"]["inconclusive"] == 1
+
+
+@pytest.fixture
+def results_dir_mixed_convergence(tmp_path):
+    """Three pairs at one config: both converged, sine truncated, base
+    truncated. Only the first should survive the default gating.
+    """
+    d = tmp_path / "mixed"
+    d.mkdir()
+    meta = {"highalpha": -4.0}
+    _write_result(d, 1, "drw", 100.0, meta, converged=True)
+    _write_result(d, 1, "drw_sine", 110.0, meta, converged=True)
+    _write_result(d, 2, "drw", 100.0, meta, converged=True)
+    _write_result(d, 2, "drw_sine", 10.0, meta, converged=False)
+    _write_result(d, 3, "drw", 100.0, meta, converged=False)
+    _write_result(d, 3, "drw_sine", 110.0, meta, converged=True)
+    return str(d)
+
+
+def test_unconverged_pairs_dropped_by_default(results_dir_mixed_convergence):
+    table = build_table(results_dir_mixed_convergence, group_cols=["highalpha"])
+    cell = table["highalpha=-4"]["DRW"]
+    assert cell["n"] == 1
+    assert cell["n_dropped_unconverged"] == 2
+    assert cell["converged_frac"] == pytest.approx(1 / 3, abs=1e-3)
+    # the surviving pair is the genuine detection; the truncated sine fit
+    # (logz 10 vs 100 -> log10 BF +39) would have flipped it to 'refute'
+    assert cell["outcomes"] == {"detect": 1, "inconclusive": 0, "refute": 0}
+
+
+def test_keep_unconverged_restores_old_behaviour(results_dir_mixed_convergence):
+    table = build_table(
+        results_dir_mixed_convergence, group_cols=["highalpha"], keep_unconverged=True
+    )
+    cell = table["highalpha=-4"]["DRW"]
+    assert cell["n"] == 3
+    assert cell["n_dropped_unconverged"] == 0
+    # the truncated fit contributes a large spurious positive Bayes factor
+    assert cell["outcomes"]["refute"] == 1
+    assert cell["outcomes"]["detect"] == 2
+
+
+def test_cell_with_no_surviving_pairs_is_reported_not_hidden(tmp_path):
+    """A cell where everything was truncated must still appear, with n=0 --
+    silently dropping it would look like the config was never run.
+    """
+    d = tmp_path / "allbad"
+    d.mkdir()
+    meta = {"highalpha": -4.0}
+    _write_result(d, 1, "drw", 100.0, meta, converged=False)
+    _write_result(d, 1, "drw_sine", 10.0, meta, converged=False)
+
+    table = build_table(str(d), group_cols=["highalpha"])
+    cell = table["highalpha=-4"]["DRW"]
+    assert cell["n"] == 0
+    assert cell["n_dropped_unconverged"] == 1
+    assert cell["converged_frac"] == 0.0
+    assert cell["log10_BF_mean"] is None
+
+
+def test_legacy_results_without_converged_key_are_kept(results_dir_null):
+    """Pre-multiband result files have no 'converged' field and must not be
+    silently discarded as unconverged.
+    """
+    table = build_table(results_dir_null, group_cols=["highalpha"])
+    assert table["highalpha=-2"]["DRW"]["n"] == 2
+    assert table["highalpha=-2"]["DRW"]["n_dropped_unconverged"] == 0

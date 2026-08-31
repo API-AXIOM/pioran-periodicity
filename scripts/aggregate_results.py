@@ -18,6 +18,22 @@ a signal was injected). Omit ``--config-csv`` to group directly off that
 ``meta`` instead of a config CSV -- the only reliable option when a results
 directory was assembled from multiple pilot/extension CSVs whose ID ranges
 you don't want to reconcile by hand.
+
+Convergence gating
+------------------
+A fit truncated by ``max_ncalls`` has not finished integrating: its ``logz``
+is wherever the integration happened to be when the cap fired, and its
+posterior has typically collapsed onto a handful of live points. Such a fit
+records ``converged: false`` (and an ``ess`` far below the sample count).
+
+Because the periodic model carries the extra parameters, it is the one that
+gets truncated first, which biases ``logz_rednoise - logz_periodic``
+*upwards* and silently suppresses detections. Both members of a pair must
+therefore be trustworthy for their Bayes factor to mean anything, so by
+default this script **drops any pair where either fit failed to converge**
+and reports the retained fraction per cell. Pass ``--keep-unconverged`` to
+restore the old unfiltered behaviour (for diagnosing a run, not for
+quoting results).
 """
 
 from __future__ import annotations
@@ -45,12 +61,19 @@ def classify(b):
     return "detect" if b < -2 else ("refute" if b > 2 else "inconclusive")
 
 
-def logz(results_dir, lc_id, model):
+def fit_summary(results_dir, lc_id, model):
+    """Return ``(logz, converged)`` for one fit, or ``None`` if absent.
+
+    ``converged`` defaults to True for legacy result files written before the
+    flag existed -- those predate the multi-band models and never approached
+    ``max_ncalls``, so treating them as converged preserves their behaviour.
+    """
     path = os.path.join(results_dir, f"{lc_id}_{model}.json")
     if not os.path.exists(path):
         return None
     with open(path) as f:
-        return json.load(f)["logz"]
+        d = json.load(f)
+    return d["logz"], bool(d.get("converged", True))
 
 
 def meta_for(results_dir, lc_id):
@@ -79,11 +102,15 @@ def row_lookup(results_dir, ids, config_csv, group_cols):
     return rows
 
 
-def build_table(results_dir, group_cols=(), config_csv=None):
+def build_table(results_dir, group_cols=(), config_csv=None, keep_unconverged=False):
     """Aggregate ``<ID>_<model>.json`` FitResults into the summary table
     described in the module docstring. ``group_cols`` come from
     ``config_csv`` if given, else from each result's own ``meta`` (see
     ``row_lookup``).
+
+    Unless ``keep_unconverged``, pairs where either fit has
+    ``converged: false`` are excluded; each cell reports ``n_dropped`` and
+    ``converged_frac`` so the loss is always visible alongside the numbers.
     """
     ids = sorted(
         {
@@ -95,23 +122,35 @@ def build_table(results_dir, group_cols=(), config_csv=None):
     rows = row_lookup(results_dir, ids, config_csv, group_cols)
 
     per_cfg = defaultdict(lambda: defaultdict(list))
+    dropped = defaultdict(lambda: defaultdict(int))
     for lc_id in ids:
         row = rows[lc_id]
         key = ", ".join(f"{c}={row[c]:g}" for c in group_cols if c in row) or "all"
         for pair, (base, sine) in PAIRS.items():
-            z0, z1 = logz(results_dir, lc_id, base), logz(results_dir, lc_id, sine)
-            if z0 is None or z1 is None:
+            f0 = fit_summary(results_dir, lc_id, base)
+            f1 = fit_summary(results_dir, lc_id, sine)
+            if f0 is None or f1 is None:
+                continue
+            (z0, ok0), (z1, ok1) = f0, f1
+            if not (ok0 and ok1) and not keep_unconverged:
+                dropped[key][pair] += 1
                 continue
             per_cfg[key][pair].append((z0 - z1) / np.log(10))
 
     table = {}
-    for key in sorted(per_cfg):
+    for key in sorted(set(per_cfg) | set(dropped)):
         table[key] = {}
-        for pair, bfs in per_cfg[key].items():
-            bfs = np.array(bfs)
+        for pair in PAIRS:
+            bfs = np.array(per_cfg[key].get(pair, []))
+            n_drop = dropped[key][pair]
+            if not len(bfs) and not n_drop:
+                continue
+            total = len(bfs) + n_drop
             table[key][pair] = {
                 "n": len(bfs),
-                "log10_BF_mean": float(bfs.mean()),
+                "n_dropped_unconverged": n_drop,
+                "converged_frac": round(len(bfs) / total, 3),
+                "log10_BF_mean": float(bfs.mean()) if len(bfs) else None,
                 "log10_BF_values": [round(float(b), 3) for b in bfs],
                 "outcomes": {
                     c: int(sum(classify(b) == c for b in bfs))
@@ -142,33 +181,63 @@ def main():
         help="comma-separated columns to group by",
     )
     ap.add_argument("--out", required=True, help="output summary JSON path")
+    ap.add_argument(
+        "--keep-unconverged",
+        action="store_true",
+        help="include pairs whose fits were truncated by max_ncalls. Their "
+        "logz is not an evidence estimate and the resulting Bayes factors are "
+        "biased towards 'refute' -- for diagnosis only, never for results",
+    )
     args = ap.parse_args()
 
     group_cols = [c for c in args.group_cols.split(",") if c]
-    table = build_table(args.results_dir, group_cols, args.config_csv)
+    table = build_table(
+        args.results_dir, group_cols, args.config_csv, args.keep_unconverged
+    )
 
     with open(args.out, "w") as f:
         json.dump(
             {
                 "table": table,
                 "thresholds": "log10B<-2 detect | +-2 inconclusive | >2 refute",
+                "unconverged_pairs": "included" if args.keep_unconverged else "dropped",
             },
             f,
             indent=1,
         )
     print(f"written {args.out}")
+    if args.keep_unconverged:
+        print(
+            "  WARNING: --keep-unconverged -- Bayes factors below include "
+            "truncated fits and are biased towards 'refute'"
+        )
 
+    kept = sum(p["n"] for pairs in table.values() for p in pairs.values())
+    drop = sum(
+        p["n_dropped_unconverged"] for pairs in table.values() for p in pairs.values()
+    )
     for key, pairs in table.items():
         cells = []
         for pair in PAIRS:
             if pair in pairs:
                 p = pairs[pair]
                 o = p["outcomes"]
+                m = p["log10_BF_mean"]
+                mean = "  n/a " if m is None else f"{m:+.2f}"
                 cells.append(
-                    f"{pair}: {p['log10_BF_mean']:+.2f} "
-                    f"(d{o['detect']}/i{o['inconclusive']}/r{o['refute']})"
+                    f"{pair}: {mean} "
+                    f"(d{o['detect']}/i{o['inconclusive']}/r{o['refute']}) "
+                    f"n={p['n']}/{p['n'] + p['n_dropped_unconverged']}"
                 )
         print(f"  {key:42s} " + " | ".join(cells))
+
+    if drop:
+        print(
+            f"\n  DROPPED {drop} of {kept + drop} pairs "
+            f"({100 * drop / (kept + drop):.1f}%) as unconverged (truncated by "
+            f"max_ncalls). Raise max_ncalls and refit -- a cell with few "
+            f"retained pairs cannot support a rate estimate."
+        )
 
 
 if __name__ == "__main__":
