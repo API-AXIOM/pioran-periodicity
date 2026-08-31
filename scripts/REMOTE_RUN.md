@@ -256,3 +256,105 @@ rows each -- 9x the null campaign's cell count. Not added to any cron
 script. Launching this is a deliberate follow-on decision once the null
 campaign's actual (not probe) cost is in hand, not something to start
 alongside it.
+
+## 8. WFD-only multi-band campaign (supersedes §7 for LSST)
+
+**Why this replaces the §7 LSST run.** That campaign is unusable: 89% of its
+fits were truncated by `max_ncalls=1000000` and never converged. See
+`comparison_reports/multiband_convergence_investigation.md` in the
+`pioran_periodicity_ai` repo. Two things changed as a result:
+
+1. `--max-ncalls` is now a flag (`MAX_NCALLS` in `run_workers.sh`). 6-band
+   LSST multi-band fits need **2.7M–4.9M** calls. **Do not launch an LSST
+   multi-band run at the default 1M.**
+2. `--checkpoint-dir` (`CHECKPOINT_DIR`) makes a truncated fit resumable
+   instead of throwaway. Needs `h5py` (`pip install h5py`, or the
+   `checkpoint` extra).
+
+The scenario CSVs are also WFD-only now (`--max-n-epochs 1000`): the deep
+drilling fields are a separate population carrying ~45% of the cost, and are
+being studied separately.
+
+### Scenario CSVs
+
+| file | rows | design | IDs |
+|---|---|---|---|
+| `lsst_wfd_multiband_null_case.csv` | 300 | 3 highalpha × 100 reps | 100000–100299 |
+| `lsst_wfd_multiband_null_case_obpl20.csv` | 60 | 20-rep OBPL control subset of the above | (subset) |
+| `lsst_wfd_multiband_signal_case.csv` | 450 | highalpha=-3.0, 9 (period,A1) × 50 reps | 101000–101449 |
+
+Pool: 100 (null) / 50 (signal) stratified WFD objects, 107–808 epochs.
+Grids are otherwise **identical** to the §7 CSVs — only the object pool
+differs — so results remain comparable cell for cell.
+
+### Launch — null campaign
+
+```bash
+cd ~/work/repositories/pioran-periodicity
+D=~/work/data/quasar_cadences
+OUT=$D/simulations/lsst_wfd_multiband_null_case
+
+MODELS=drw MULTIBAND=true MAX_NCALLS=8000000 \
+CHECKPOINT_DIR=$OUT/checkpoints \
+CADENCE_LIBRARY=$D/cadence_library \
+CONDA_ENV=periodicity313 \
+./scripts/run_workers.sh $OUT $D/scenario_csvs/lsst_wfd_multiband_null_case.csv 12
+```
+
+### Launch — signal campaign
+
+Same, with the signal CSV and its own output directory:
+
+```bash
+OUT=$D/simulations/lsst_wfd_multiband_signal_case
+
+MODELS=drw MULTIBAND=true MAX_NCALLS=8000000 \
+CHECKPOINT_DIR=$OUT/checkpoints \
+CADENCE_LIBRARY=$D/cadence_library \
+CONDA_ENV=periodicity313 \
+./scripts/run_workers.sh $OUT $D/scenario_csvs/lsst_wfd_multiband_signal_case.csv <N_WORKERS>
+```
+
+### Optional: OBPL control
+
+OBPL is ~3.5× DRW's cost and has returned FPR 0% in every cell of every
+campaign so far, so it runs as a 20-rep control rather than on the full
+grid. It shares the null campaign's IDs, so it reuses the cached light
+curves and writes into the same results directory — run it **after** the
+DRW campaign, or alongside it with fewer workers:
+
+```bash
+MODELS=obpl MULTIBAND=true MAX_NCALLS=8000000 \
+CHECKPOINT_DIR=$OUT/checkpoints \
+CADENCE_LIBRARY=$D/cadence_library \
+CONDA_ENV=periodicity313 \
+./scripts/run_workers.sh $OUT $D/scenario_csvs/lsst_wfd_multiband_null_case_obpl20.csv 4
+```
+
+### Cost (projected from measured per-call costs, §11 of the report)
+
+| campaign | models | core-h | wall @12 workers |
+|---|---|---|---|
+| null | drw + drw_sine | ~680 | ~2.4 days |
+| null OBPL control (60 rows) | obpl + obpl_sine | ~470 | (run at 4 workers: ~5 days) |
+| signal | drw + drw_sine | ~1020 | ~3.5 days |
+
+### Checking the result — the step that failed last time
+
+`aggregate_results.py` now drops unconverged pairs **by default** and reports
+what it dropped. Run it early (a day in, not at the end):
+
+```bash
+conda run -n periodicity313 python scripts/aggregate_results.py \
+    --results-dir $OUT/results --group-cols highalpha \
+    --out $OUT/summary.json
+```
+
+If the `DROPPED n of m pairs` line shows more than a few percent, **stop and
+raise `MAX_NCALLS`** rather than letting the campaign finish — with
+`CHECKPOINT_DIR` set, relaunching continues the existing fits instead of
+restarting them. A quick direct check on the same question:
+
+```bash
+grep -c UNCONVERGED $OUT/logs/*.log
+```
