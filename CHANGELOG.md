@@ -4,6 +4,76 @@ All notable changes to `pioran_periodicity`. Analysis-level decisions (prior
 choices, leakage acceptance, per-run scope) are recorded separately in
 `comparison_reports/changes_and_decisions.md`.
 
+## [0.2.0] — 2026-09-03
+
+Breaking. Renamed sampled parameters, changed prior families, and changed
+campaign defaults. **Every simulated light curve and every fit produced
+before this release is invalid** — see the invalidation list below. Full
+write-up, with the model equations and a parameter glossary, in
+`comparison_reports/bugfix_report.tex` (MB-series).
+
+### Fixed
+- **MB1** `kernels.gp_log_likelihood_multiband` subtracted the mean function
+  *before* dividing by `a_b`, fitting `y_b = mu_b + m(t) + a_b*x(t)` — a
+  band-independent sine against band-dependent red noise — while
+  `simulate.sample_real_cadence` injects `a_b*(x + m)`. Both docstrings
+  claimed the two matched. Verified against a dense multivariate normal.
+  This is what made the steep-slope false positives vanish in the multi-band
+  LSST null relative to the single-band campaign. The rescale Jacobian and
+  the `yerr/a` scaling were already correct.
+- **MB3.3** ZTF `magerr` was consumed as a fractional *flux* error; added
+  `simulate.MAG_TO_FRACTIONAL_FLUX = 0.4*ln(10)`, so both survey noise
+  prescriptions are now expressed in the same units.
+- **MB3.4** the sine period bound relied on `max(4.0, nan)` returning 4.0,
+  true only by Python's argument order; replaced with `np.isfinite`
+  filtering in the new `run_sim.resolve_period_prior`.
+
+### Changed
+- **MB2** sine model parameters `A1`/`A2` → **`A_cos`/`A_sin`** (they are
+  coefficients, and `A1` collided with the scenario-CSV column of the same
+  name, which is an injected *amplitude* and was passed into the `A2` slot).
+  New `means.sine_amplitude()` gives the derived amplitude — the only
+  quantity comparable to the CSV's `A1`. Result files written earlier keep
+  the old sample keys; `paper/plot_fits.py` and `plot_corners.py` read both.
+- **MB3.1** the sine period prior is now the fixed `run_sim.PERIOD_PRIOR =
+  (0.2, 8.0)` yr for every scenario, overridable only via `--period-max`. It
+  used to be derived per CSV, silently giving nulls `(0.2, 4.0)` and signals
+  `(0.2, 8.0)`, so false-positive thresholds were calibrated under a
+  different model than detection power (~0.7 nat).
+- **MB3.5** campaign CSVs set `sharpness = 1.0` (was 10.0). Pioran's
+  `SingleBendingPowerLaw` has no sharpness parameter, so simulating at 10
+  put a knee in the data the fitted OBPL cannot represent — a factor 1.87
+  (0.27 dex) PSD discrepancy at the bend, inside the science band.
+- **MB3.2** `HIGHALPHA_DEFAULT` now `-2.0,-2.3,-2.6,-2.9,-3.2,-3.5`. A truth
+  of `-4.0` maps to `alpha_high = 4.0`, exactly the prior bound, which is
+  itself the SHO/n=20 basis-accuracy limit (3% error at 4.0, 35% at 4.5).
+- Sine amplitude prior is now **hierarchical**: `A_cos, A_sin ~ Normal(0,
+  f0*sigma)` with `sigma` a sampled parameter (new
+  `priors.ProcessRelativeNormal`), so the prior is on the dimensionless
+  `f = A/sigma` and is scale-free across objects. `PriorConfig.
+  sine_amplitude_fraction = 1.2`; `sine_amplitude_scale` is retained as the
+  CARMA fallback (CARMA has no sampled process variance) and the choice is
+  recorded in `meta["sine_amplitude_prior"]`.
+- Sine period prior is now **log-uniform** (period is a scale parameter).
+
+### Added
+- `beta_sine` (`build_family(fit_sine_colour=True)`, `run_sim
+  --fit-sine-colour`, off by default): gives the periodic component its own
+  per-band amplitude `c_b = (lambda_b/lambda_ref)**-beta_sine`, independent
+  of the noise's `a_b`. Without it the sine and the noise share a colour and
+  multi-band data cannot distinguish a real signal from red-noise leakage.
+  One parameter regardless of filter count; measured cost ndim 11→12,
+  runtime ×1.33.
+- `tests/test_model_conventions.py` (66 tests) pins the simulator/likelihood
+  contract. Each test checks against an independent reference **and**
+  asserts the rival convention differs for that input, so it cannot
+  degenerate the way the old `mean_func=None` brute-force check did.
+
+### Invalidates
+- All simulated light curves (MB3.5 changed the injection PSD — re-simulate,
+  not refit), all multi-band fits (MB1; every multi-band CSV uses
+  `beta=0.35`), all null fits (MB3.1), all ZTF simulations (MB3.3).
+
 ## [0.1.3] — 2026-07-29
 ### Added
 - `visualization.py`: `plot_detection_rate` (single-curve P(detect)-vs-one
