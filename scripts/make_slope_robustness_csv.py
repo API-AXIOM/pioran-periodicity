@@ -48,7 +48,16 @@ import argparse
 import numpy as np
 import pandas as pd
 
-HIGHALPHA_DEFAULT = "-2.0,-2.4,-2.8,-3.2,-3.6,-4.0"
+# Steepest value is -3.5, NOT -4.0. The fitted OBPL slope is
+# alpha_high = -highalpha, and the prior is alpha_high ~ U(alpha_low, 4.0);
+# a truth of exactly 4.0 sits ON that boundary (17% of those fits piled above
+# 3.9 and the cell recovered 3.76 while every other cell recovered to within
+# 0.1). The 4.0 bound is itself set by the basis expansion: with the SHO
+# basis at n=20 components -- what the campaigns actually used -- the PSD
+# approximation error is 3% at alpha_high=4.0 but 35% at 4.5. Keeping the
+# truths at <=3.5 leaves them interior to both the prior and the accurate
+# region (1.8% error at n=20). See defect MB3.2.
+HIGHALPHA_DEFAULT = "-2.0,-2.3,-2.6,-2.9,-3.2,-3.5"
 
 # Period-specific (low, at-limit ~50% detect, comfortably-above ~90%+ detect)
 # amplitude triads for the fixed cadence below (NumofWINDOW=20, rms=0.15).
@@ -69,7 +78,13 @@ PERIOD_A1_DEFAULT = [
 FIXED_DEFAULTS = dict(
     lowalpha=-1.0,
     bendfreq=0.005479452054794521,
-    sharpness=10.0,
+    # Pioran's SingleBendingPowerLaw is P(f) = (f/fb)^-a1 / (1 + (f/fb)^(a2-a1)),
+    # i.e. sharpness is hard-wired to 1 with no free parameter. Simulating with
+    # sharpness=10 (the old default) put a knee in the data that the fitted OBPL
+    # cannot represent: a factor 1.87 (0.27 dex) PSD discrepancy AT the bend
+    # frequency, which sits inside the science band. Injection and inference now
+    # use the same PSD family (defect MB3.5).
+    sharpness=1.0,
     rms=0.15,
     noiseSIGMA=0.015,
     NightsperWINDOW=15,

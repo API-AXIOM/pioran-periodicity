@@ -98,6 +98,14 @@ def _make_toy_case(n_per_band, band_amp_true, seed):
 
 @pytest.mark.parametrize("n_bands,n_per_band", [(2, 8), (3, 6), (4, 5)])
 def test_rescale_trick_matches_brute_force(n_bands, n_per_band):
+    """Covers the covariance and the Jacobian ONLY -- mean_func is None here.
+
+    Do not read this as validating the whole multi-band likelihood: with no
+    mean function the "mean in latent units" and "mean in observed units"
+    conventions coincide, and this test passed throughout the MB1 defect
+    (2026-08 to 2026-09-03). The mean-function conventions are pinned in
+    tests/test_model_conventions.py.
+    """
     band_amp_true = RNG.uniform(0.4, 2.5, n_bands)
     band_amp_true[0] = 1.0  # pinned reference band
     band_mu_true = np.zeros(n_bands)

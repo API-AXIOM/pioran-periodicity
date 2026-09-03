@@ -334,6 +334,7 @@ def gp_log_likelihood_multiband(
     band_mu,
     mean_func=None,
     err_scale: float = 1.0,
+    band_mean_amp=None,
 ) -> float:
     """Multi-band GP log-likelihood via the rescale trick.
 
@@ -353,10 +354,32 @@ def gp_log_likelihood_multiband(
     ``band_mu``, 1-D arrays of length n_bands with ``band_amp[0] == 1.0``,
     ``band_mu[0] == 0.0`` for the pinned reference band (index 0).
 
-    ``mean_func`` (sine/linear periodic signal) is evaluated in
-    shared-latent-process units and is therefore rescaled per band by the
-    same division as ``x(t)`` -- deliberate, not a separate per-band
-    amplitude parameter for the periodic component.
+    The general model is
+
+        y_b(t) = mu_b + a_b * x(t) + c_b * m(t) + noise_b(t),
+
+    with ``c_b = band_mean_amp`` the periodic component's OWN per-band
+    amplitude. ``band_mean_amp=None`` (the default) sets ``c_b = a_b``: the
+    periodic component then carries the same colour dependence as the red
+    noise, which is what
+    :func:`pioran_periodicity.simulate.sample_real_cadence` injects
+    (``flux += a * signal``), and the fitted amplitude is in reference-band
+    units.
+
+    Passing an explicit ``band_mean_amp`` frees the periodic component's
+    colour from the noise's. That is the discriminating measurement: red
+    noise leaking into the sine inherits the noise's colour (``c_b ~ a_b``),
+    whereas a binary's Doppler-boosted modulation has its own, SED-predicted
+    wavelength dependence. Note ``c_b = 1`` for all b recovers the MB1 defect
+    -- the bug and the fix are the two endpoints of this one-parameter
+    family, which is why it costs a single extra dimension.
+
+    NOTE this was wrong before 2026-09-03: the mean was subtracted BEFORE
+    the division, fitting ``y_b = mu_b + m(t) + a_b * x(t)`` -- a
+    band-independent sine against band-dependent red noise. The two forms
+    coincide only when every ``a_b == 1``, which is why a test with
+    ``mean_func=None`` (or unit amplitudes) cannot see the difference. See
+    the MB1 entry in comparison_reports/bugfix_report.tex.
     """
     band = np.asarray(band, dtype=np.int64)
     band_amp = np.asarray(band_amp, dtype=np.float64)
@@ -364,12 +387,26 @@ def gp_log_likelihood_multiband(
     a = band_amp[band]  # (n_points,), per-point amplitude via band code lookup
     mu = band_mu[band]  # (n_points,), per-point mean offset via band code lookup
 
+    # Rescale into shared-latent units FIRST, then subtract the mean
+    # function -- m(t) is part of the latent process and is therefore
+    # scaled by a_b exactly like x(t) (see the docstring above).
     r = np.asarray(y, dtype=np.float64) - mu
     if mean_func is not None:
-        r = r - np.asarray(mean_func(t), dtype=np.float64)
+        m = np.asarray(mean_func(t), dtype=np.float64)
+        if band_mean_amp is None:
+            # c_b = a_b: the periodic component shares the red noise's colour,
+            # so it divides out with x(t) and is subtracted in latent units
+            r = r / a - m
+        else:
+            # c_b independent of a_b: subtract c_b*m(t) in OBSERVED units,
+            # then rescale (c_b == a_b reproduces the branch above exactly)
+            c = np.asarray(band_mean_amp, dtype=np.float64)[band]
+            r = (r - c * m) / a
+    else:
+        r = r / a
 
     ll = gp_log_likelihood(
-        kernel, t, r / a, np.asarray(yerr, dtype=np.float64) / a,
+        kernel, t, r, np.asarray(yerr, dtype=np.float64) / a,
         mean_func=None, err_scale=err_scale,
     )
     return ll - float(np.sum(np.log(a)))

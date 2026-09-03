@@ -35,8 +35,11 @@ LABELS = {
     "log10_fbend": r"$\log_{10} f_\mathrm{bend}$",
     "alpha_low": r"$\alpha_\mathrm{low}$",
     "alpha_high": r"$\alpha_\mathrm{high}$",
-    "A1": r"$A_1$",
-    "A2": r"$A_2$",
+    "A_cos": r"$A_\mathrm{cos}$",
+    "A_sin": r"$A_\mathrm{sin}$",
+    # legacy spellings (results written before the 2026-09-03 rename, MB2)
+    "A1": r"$A_\mathrm{cos}$",
+    "A2": r"$A_\mathrm{sin}$",
     "period": r"$T_\mathrm{period}$",
     "err_scale": r"$\nu$",
     "slope": r"$m$",

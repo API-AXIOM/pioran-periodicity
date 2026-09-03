@@ -33,6 +33,14 @@ __all__ = [
 DAYS_PER_YEAR = 365.0
 DAYS_PER_MONTH = 30.0
 
+# d(F)/F per magnitude: F = 10^(-0.4 m) => |dF/F| = 0.4 ln(10) |dm|.
+# The surveys' noise prescriptions return different quantities -- LSST's
+# depth relation a fractional FLUX error, ZTF's fitted magerr(mag) relation
+# a MAGNITUDE error -- and this pipeline's light curves are fluxes (mean 1,
+# fractional rms `rms`), so the magnitude branch must be converted. Omitting
+# it made ZTF epochs 1/0.921 = 1.086x noisier than intended (defect MB3.3).
+MAG_TO_FRACTIONAL_FLUX = 0.4 * np.log(10.0)
+
 
 @dataclass
 class SimulatedLightCurve:
@@ -216,13 +224,31 @@ def sample_real_cadence(
     an injected signal's phase relative to the real seasonal gaps is not
     fixed run to run.
 
-    Noise is heteroscedastic and per-epoch: rows with a real ``depth``
-    (LSST/OpSim) use :func:`pioran_periodicity.cadence.depth_to_fractional_error`;
-    rows without (ZTF) use ``noise_model(band, ref_mag)`` -- the survey's
-    fitted magerr(mag) relation evaluated at the object's fixed catalog
-    magnitude ``ref_mag`` (this pipeline simulates one brightness level per
-    object, not per-epoch photometry). The resulting fractional error is
-    scaled by the realised light curve's own mean flux level.
+    Noise comes from one of two survey-specific prescriptions, chosen row by
+    row on whether a real ``depth`` is present. Both are converted to the
+    SAME quantity -- a fractional flux error -- and then scaled by the
+    realised light curve's own mean flux level:
+
+    * **LSST/OpSim** (finite ``depth``): the visit's ``fiveSigmaDepth`` via
+      :func:`pioran_periodicity.cadence.depth_to_fractional_error`,
+      ``sigma_F/F = 0.2 * 10**(0.4*(ref_mag - depth))``. Already a fractional
+      flux error. Genuinely heteroscedastic: depth varies epoch to epoch with
+      observing conditions (21.0-25.2 across the library), so every visit
+      gets its own uncertainty.
+    * **ZTF** (no depth): the survey's ``magerr(mag)`` polynomial, fitted to
+      real ZTF photometry, evaluated at the object's fixed catalogue
+      magnitude ``ref_mag``. Returns a MAGNITUDE error, converted here with
+      ``MAG_TO_FRACTIONAL_FLUX``. Constant across epochs within a band
+      (homoscedastic), because ``ref_mag`` is fixed per object -- this
+      pipeline simulates one brightness level per object, not per-epoch
+      photometry.
+
+    The prescriptions differ because the surveys do (ZTF has real photometry
+    but no published per-visit depth; the LSST cadence is an OpSim visit
+    schedule with depths but no photometry). Expressing both as fractional
+    flux errors is what makes the ZTF-vs-LSST precision comparison
+    meaningful. Neither feeds the realised variability back into the
+    uncertainty.
 
     ``band_amp`` / ``band_mu`` ({band: value} dicts, default None) inject
     colour-dependent variability: ``y_b(t) = mu_b + a_b * x(t) + noise_b(t)``,
@@ -282,7 +308,11 @@ def sample_real_cadence(
             )
         for b in np.unique(band[~has_depth]):
             sel = (~has_depth) & (band == b)
-            frac_err[sel] = noise_model(b, np.full(int(sel.sum()), ref_mag))
+            # noise_model returns a MAGNITUDE error; convert to the
+            # fractional flux error the depth branch already produces
+            frac_err[sel] = MAG_TO_FRACTIONAL_FLUX * noise_model(
+                b, np.full(int(sel.sum()), ref_mag)
+            )
     flux_err = frac_err * ref_flux
 
     # (n_points,) per-epoch amplitude/offset; only built when colour

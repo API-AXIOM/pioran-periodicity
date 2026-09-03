@@ -30,12 +30,15 @@ from .kernels import (
     obpl_kernel,
 )
 from .means import combine_means, linear_mean, sine_mean
+from .multiband import EFFECTIVE_WAVELENGTHS
 from .priors import (
     ConditionalUniform,
     LogNormal,
+    LogUniform,
     Normal,
     Parameter,
     PriorTransform,
+    ProcessRelativeNormal,
     Uniform,
 )
 
@@ -68,10 +71,29 @@ class PriorConfig:
     alpha_low: tuple[float, float] = (0.0, 2.0)
     alpha_high_max: float = 4.0
 
-    # sine mean: A1, A2 ~ Normal(0, sine_amplitude_scale); Rayleigh marginal
-    # amplitude. Set the scale to the expected variability amplitude (M6).
-    sine_amplitude_scale: float = 0.5
-    # period range; lower bound must be > 0 (fix M5)
+    # Sine mean. A_cos, A_sin are COEFFICIENTS, not the amplitude, and are
+    # unrelated to the scenario CSV's `A1` column (the injected amplitude) --
+    # see means.py on naming (fix MB2). The induced prior on the amplitude
+    # sqrt(A_cos^2 + A_sin^2) is Rayleigh.
+    #
+    # Two mutually exclusive parametrisations, preferring the first:
+    #   sine_amplitude_fraction -- HIERARCHICAL: A ~ f * sigma_process, with
+    #     sigma_process a sampled parameter. The prior is then on the
+    #     dimensionless ratio f = A/sigma, which is the physically meaningful
+    #     quantity and is scale-free across a survey spanning sigma ~
+    #     0.03-0.5 mag. Requires a noise model exposing log10_variance.
+    #   sine_amplitude_scale -- ABSOLUTE, in data units. Required for CARMA,
+    #     whose process variance is not a sampled parameter. Used as the
+    #     fallback whenever the relative form cannot be built.
+    # At least one must be set. Default f = 1.2 gives a Rayleigh(1.2) prior on
+    # f: median 1.4, 90th pct 2.6, 99th 3.6 -- bracketing PG 1302-102's
+    # measured f = 2.3 without weight at f > 5, where a periodic signal would
+    # dominate the light curve.
+    sine_amplitude_fraction: float | None = 1.2
+    sine_amplitude_scale: float | None = 0.5
+    # period range in YEARS; sampled LOG-uniformly (period is a scale
+    # parameter, so equal weight per octave, and the Occam contribution is
+    # the single number log(hi/lo)). Lower bound must be > 0 (fix M5).
     period: tuple[float, float] = (0.05, 5.0)
 
     # linear-trend mean
@@ -87,6 +109,15 @@ class PriorConfig:
     log10_carma_beta: tuple[float, float] = (-6.5, 6.5)
     log10_carma_sigma: tuple[float, float] = (-1.3, 2.3)
 
+    # Sine colour index beta_sine ~ Normal(0, sine_colour_scale), fitted only
+    # when build_family(fit_sine_colour=True). It frees the PERIODIC
+    # component's per-band amplitude c_b = (lambda_b/lambda_ref)**-beta_sine
+    # from the red noise's a_b. beta_sine = 0 is achromatic; beta_sine equal
+    # to the noise's colour index is what red-noise leakage looks like, so
+    # the posterior's position between those is the discriminant. Scale 1.0
+    # is broad enough to cover both and either sign.
+    sine_colour_scale: float = 1.0
+
     # multi-band (non-reference-band) priors: a_b ~ LogNormal(0, sigma),
     # mu_b ~ Normal(0, scale). Reference band's a_ref=1, mu_ref=0 are pinned,
     # not fit (see multiband.BandEncoding, models._band_parameters).
@@ -98,8 +129,20 @@ class PriorConfig:
             raise ValueError("period lower bound must be > 0 (fix M5)")
         if self.err_scale is not None and self.err_scale[0] <= 0:
             raise ValueError("err_scale lower bound must be > 0 (fix S2-real)")
-        if self.sine_amplitude_scale <= 0:
+        if self.sine_amplitude_fraction is None and self.sine_amplitude_scale is None:
+            raise ValueError(
+                "set sine_amplitude_fraction (relative, preferred) or "
+                "sine_amplitude_scale (absolute); both are None"
+            )
+        if (
+            self.sine_amplitude_fraction is not None
+            and self.sine_amplitude_fraction <= 0
+        ):
+            raise ValueError("sine_amplitude_fraction must be > 0")
+        if self.sine_amplitude_scale is not None and self.sine_amplitude_scale <= 0:
             raise ValueError("sine_amplitude_scale must be > 0")
+        if self.sine_colour_scale <= 0:
+            raise ValueError("sine_colour_scale must be > 0")
 
 
 # ---------------------------------------------------------------------------
@@ -187,14 +230,52 @@ def _noise_parameters(
     raise ValueError(f"unknown noise model '{noise}'")
 
 
-def _mean_parameters(variant: str, cfg: PriorConfig) -> list[Parameter]:
+def _uses_relative_sine_amplitude(cfg: PriorConfig, noise: str) -> bool:
+    """Whether the hierarchical (relative) sine-amplitude prior applies.
+
+    Single source of truth: both the prior construction and the ``meta``
+    record derive from this, so the recorded parametrisation can never
+    disagree with the one actually built.
+    """
+    return cfg.sine_amplitude_fraction is not None and noise != "carma"
+
+
+def _sine_amplitude_prior_label(cfg: PriorConfig, noise: str, variant: str):
+    if "sine" not in variant:
+        return None
+    if _uses_relative_sine_amplitude(cfg, noise):
+        return f"relative:f={cfg.sine_amplitude_fraction}"
+    return f"absolute:{cfg.sine_amplitude_scale}"
+
+
+def _mean_parameters(
+    variant: str, cfg: PriorConfig, noise: str = "drw"
+) -> list[Parameter]:
+    """Mean-function parameters.
+
+    ``noise`` selects the sine-amplitude parametrisation: every noise model
+    except CARMA exposes ``log10_variance``, so the hierarchical
+    ``sine_amplitude_fraction`` prior can be used; CARMA's process variance
+    is a nonlinear function of its AR/MA coefficients rather than a sampled
+    parameter, so it falls back to the absolute ``sine_amplitude_scale``.
+    """
     params: list[Parameter] = []
     if "sine" in variant:
-        s = cfg.sine_amplitude_scale
+        relative = _uses_relative_sine_amplitude(cfg, noise)
+        if relative:
+            amp_prior = ProcessRelativeNormal(cfg.sine_amplitude_fraction)
+        else:
+            if cfg.sine_amplitude_scale is None:
+                raise ValueError(
+                    f"noise model {noise!r} cannot use the relative sine "
+                    f"amplitude prior (no sampled process variance); set an "
+                    f"absolute sine_amplitude_scale on the PriorConfig"
+                )
+            amp_prior = Normal(0.0, cfg.sine_amplitude_scale)
         params += [
-            Parameter("A1", Normal(0.0, s)),
-            Parameter("A2", Normal(0.0, s)),
-            Parameter("period", Uniform(*cfg.period)),
+            Parameter("A_cos", amp_prior),
+            Parameter("A_sin", amp_prior),
+            Parameter("period", LogUniform(*cfg.period)),
         ]
     if "linear" in variant:
         params += [
@@ -281,12 +362,14 @@ def _mean_builder(variant: str):
     if variant == "plain":
         return lambda p: None
     if variant == "sine":
-        return lambda p: (lambda t: sine_mean(t, p["A1"], p["A2"], p["period"]))
+        return lambda p: (
+            lambda t: sine_mean(t, p["A_cos"], p["A_sin"], p["period"])
+        )
     if variant == "linear":
         return lambda p: (lambda t: linear_mean(t, p["slope"], p["intercept"]))
     if variant == "sine+linear":
         return lambda p: combine_means(
-            lambda t: sine_mean(t, p["A1"], p["A2"], p["period"]),
+            lambda t: sine_mean(t, p["A_cos"], p["A_sin"], p["period"]),
             lambda t: linear_mean(t, p["slope"], p["intercept"]),
         )
     raise ValueError(f"unknown variant '{variant}'")
@@ -307,6 +390,9 @@ def build_family(
     carma_order: tuple[int, int] = (2, 1),
     photometric_bands: Sequence[str] | None = None,
     fit_band_means: bool = True,
+    fit_sine_colour: bool = False,
+    reference_band: str | None = None,
+    survey: str = "lsst",
 ) -> ModelFamily:
     """Build a noise model and its mean-function variants.
 
@@ -319,6 +405,17 @@ def build_family(
         NOT the photometric band -- see ``photometric_bands`` below.
     n_components, basis_function : OBPL approximation settings
     carma_order : (p, q) for CARMA
+    fit_sine_colour : add a single ``beta_sine`` parameter giving the
+        PERIODIC component its own per-band amplitude
+        ``c_b = (lambda_b/lambda_ref)**-beta_sine``, independent of the red
+        noise's ``a_b``. Costs exactly one dimension regardless of how many
+        bands there are, because the colour dependence is parametrised rather
+        than free per band. Requires ``photometric_bands`` and
+        ``reference_band``, and applies only to sine-bearing variants.
+        Default False, which keeps ``c_b = a_b`` (the periodic component
+        shares the noise's colour).
+    reference_band, survey : needed only with ``fit_sine_colour``, to look up
+        filter wavelengths in ``multiband.EFFECTIVE_WAVELENGTHS``.
     photometric_bands : non-reference photometric band names (e.g. ZTF/LSST
         filters), in ``multiband.BandEncoding.others`` order. None (default)
         builds an ordinary single-band model, unchanged from before this
@@ -333,6 +430,27 @@ def build_family(
     """
     if noise == "obpl" and band is not None:
         band.check_density(n_components)  # single upfront density check (M3)
+
+    # (n_other,) lambda_b / lambda_ref, precomputed so the likelihood does no
+    # dict lookups per call. None unless the sine colour is actually fitted.
+    sine_wl_ratios = None
+    if fit_sine_colour:
+        if not photometric_bands or reference_band is None:
+            raise ValueError(
+                "fit_sine_colour needs photometric_bands and reference_band"
+            )
+        table = EFFECTIVE_WAVELENGTHS.get(survey)
+        if table is None:
+            raise ValueError(
+                f"no filter wavelengths for survey {survey!r}; "
+                f"have {sorted(EFFECTIVE_WAVELENGTHS)}"
+            )
+        unknown = sorted(set(list(photometric_bands) + [reference_band]) - set(table))
+        if unknown:
+            raise ValueError(f"no wavelength for {survey} band(s) {unknown}")
+        sine_wl_ratios = np.array(
+            [table[b] / table[reference_band] for b in photometric_bands]
+        )
 
     noise_params = _noise_parameters(noise, cfg, carma_order)
     kernel_of = _kernel_builder(noise, carma_order, band, n_components, basis_function)
@@ -349,7 +467,12 @@ def build_family(
         params = (
             list(noise_params)
             + list(band_params)
-            + _mean_parameters(variant, cfg)
+            + _mean_parameters(variant, cfg, noise)
+            + (
+                [Parameter("beta_sine", Normal(0.0, cfg.sine_colour_scale))]
+                if (sine_wl_ratios is not None and "sine" in variant)
+                else []
+            )
             + list(err_param)
         )
         prior = PriorTransform(params)
@@ -364,6 +487,7 @@ def build_family(
             _kernel_of=kernel_of,
             _mean_of=mean_of,
             _photometric_bands=photometric_bands,
+            _sine_wl_ratios=sine_wl_ratios,
         ):
             kernel = _kernel_of(pdict)
             mean_func = _mean_of(pdict)
@@ -380,6 +504,12 @@ def build_family(
                 [0.0]
                 + [pdict.get(f"mu_{b}", 0.0) for b in _photometric_bands]
             )
+            # c_b for the periodic component; None => c_b = a_b
+            band_mean_amp = None
+            if _sine_wl_ratios is not None and "beta_sine" in pdict:
+                band_mean_amp = np.concatenate(
+                    ([1.0], _sine_wl_ratios ** (-pdict["beta_sine"]))
+                )
             return gp_log_likelihood_multiband(
                 kernel,
                 t,
@@ -390,6 +520,7 @@ def build_family(
                 band_mu,
                 mean_func=mean_func,
                 err_scale=err_scale,
+                band_mean_amp=band_mean_amp,
             )
 
         name = noise if variant == "plain" else f"{noise}+{variant}"
@@ -413,6 +544,13 @@ def build_family(
                     }
                 ),
                 "carma_order": carma_order if noise == "carma" else None,
+                "sine_amplitude_prior": _sine_amplitude_prior_label(
+                    cfg, noise, variant
+                ),
+                "fit_sine_colour": bool(
+                    sine_wl_ratios is not None and "sine" in variant
+                ),
+                "reference_band": reference_band,
                 "photometric_bands": (
                     list(photometric_bands) if photometric_bands else None
                 ),

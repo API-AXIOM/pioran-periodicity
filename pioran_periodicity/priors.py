@@ -29,6 +29,7 @@ __all__ = [
     "LogUniform",
     "LogNormal",
     "ConditionalUniform",
+    "ProcessRelativeNormal",
     "Parameter",
     "PriorTransform",
 ]
@@ -117,6 +118,56 @@ class LogNormal(Distribution):
 
     def describe(self):
         return f"LogNormal(mu_log10={self.mu_log10}, sigma_log10={self.sigma_log10})"
+
+
+@dataclass(frozen=True)
+class ProcessRelativeNormal(Distribution):
+    """Normal(0, fraction * sigma_process), with sigma_process taken from an
+    EARLIER sampled parameter rather than fixed in advance.
+
+    Used for the sine coefficients: the physically meaningful quantity is the
+    periodic amplitude *relative to the object's own stochastic variability*,
+    f = A / sigma, not an absolute magnitude. Quasar variability spans
+    sigma ~ 0.03-0.5 mag across a survey, so a fixed absolute scale is
+    strongly informative for a quiet object and nearly vacuous for a variable
+    one -- which silently varies the Occam factor, and hence the effective
+    detection threshold, from object to object, so one null calibration would
+    not transfer across the sample.
+
+    This is legitimate hierarchical modelling, p(A | sigma) p(sigma), and NOT
+    the M2/M6 defect of setting a prior from the data: ``variance_param`` is a
+    *sampled* parameter, never ``var(y)``. It must be declared before this one
+    (``build_family`` puts noise parameters first).
+
+    With independent ProcessRelativeNormal priors on the two sine
+    coefficients, the induced prior on the amplitude ratio f is Rayleigh with
+    scale ``fraction`` and the phase is uniform.
+    """
+
+    fraction: float
+    variance_param: str = "log10_variance"
+
+    def __post_init__(self):
+        if self.fraction <= 0:
+            raise ValueError("ProcessRelativeNormal requires fraction > 0")
+
+    def transform(self, u, previous):
+        if self.variance_param not in previous:
+            raise KeyError(
+                f"ProcessRelativeNormal needs {self.variance_param!r} to be "
+                f"transformed first; available: {list(previous)}. Noise "
+                f"parameters are declared before mean parameters, so this "
+                f"means the noise model does not expose a process variance "
+                f"(CARMA does not -- give it an absolute "
+                f"sine_amplitude_scale instead)."
+            )
+        sigma_process = np.sqrt(10.0 ** previous[self.variance_param])
+        return self.fraction * sigma_process * _scipy_norm.ppf(u)
+
+    def describe(self):
+        return (
+            f"Normal(0, {self.fraction} * sqrt(10**{self.variance_param}))"
+        )
 
 
 @dataclass(frozen=True)

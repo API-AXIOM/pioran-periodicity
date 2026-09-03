@@ -35,11 +35,16 @@ A CSV without ``period``/``A1`` columns (or with ``A1 == 0``) simulates pure
 red noise, as before -- this is what makes a config a genuine null/no-signal
 scenario for FPR calibration.
 
-The sine period prior's upper bound is set from the CSV's own ``period``
-column (max true period + 0.5 yr headroom, floor 4.0 yr) so a signal-bearing
-scenario's true periods always fall inside the fitted prior's support --
-mirrors ``workspace/run_sim.py``'s per-scenario ``period_max`` (e.g. 8.0 for
-3.7's periods up to 7.5 yr).
+The sine period prior is FIXED at ``PERIOD_PRIOR`` (0.2--8.0 YEARS) for every
+scenario, null and signal alike, overridable only through the explicit
+``--period-max`` flag. It used to be derived from the CSV's own ``period``
+column, which silently gave null CSVs (empty column) an upper bound of 4.0 yr
+and signal CSVs 8.0 yr: the false-positive rate was then calibrated under a
+model with half the sine prior volume of the model used to measure detection
+power, biasing every null Bayes factor by ~log(7.8/3.8) ~ 0.7 nat relative to
+the signal runs. A Bayes factor is only comparable across runs sharing a
+prior (defect MB3.1). Injected periods outside the prior are now a hard error
+rather than a silent truncation.
 
 Resumable: existing light-curve .npz files are reused, existing per-fit
 JSONs are skipped. Split across workers with --stride / --worker.
@@ -91,16 +96,60 @@ OBPL_MAX_REL_ERROR = 0.05
 # from the KNOWN simulation scale, never from the fitted data. No error-scale
 # parameter: the simulation noise is known exactly. Only the sine period cap
 # varies (per config CSV, from its own period column -- see make_cfg/main).
-def make_cfg(period_max: float = 4.0) -> pp.PriorConfig:
+# Sine period prior, in YEARS (t is in years throughout this pipeline).
+# Identical for null and signal campaigns so their Bayes factors are
+# comparable; 8.0 yr covers the longest injected period (7.5 yr) with
+# headroom.
+PERIOD_PRIOR = (0.2, 8.0)
+
+
+def make_cfg(period_max: float = PERIOD_PRIOR[1]) -> pp.PriorConfig:
     return pp.PriorConfig(
         log10_variance=(-4.0, 1.0),
         log10_fbend=(-3.0, 2.0),
         alpha_low=(0.0, 2.0),
         alpha_high_max=4.0,
+        # Relative (hierarchical) sine amplitude: the prior is on
+        # f = A / sigma_process, not on an absolute magnitude, so it is
+        # scale-free across objects. 0.15 is kept only as the CARMA
+        # fallback -- CARMA has no sampled process variance -- and equals
+        # the campaigns' known simulated rms, so f = A1/0.15 there.
+        sine_amplitude_fraction=1.2,
         sine_amplitude_scale=0.15,
-        period=(0.2, period_max),
+        period=(PERIOD_PRIOR[0], period_max),
         err_scale=None,
     )
+
+
+def resolve_period_prior(df, period_max):
+    """The sine period prior's upper bound (years) for this scenario CSV.
+
+    Returns ``period_max`` unchanged -- the prior is FIXED, never derived
+    from the data (MB3.1) -- after checking every injected period fits
+    inside it, raising rather than silently fitting a signal the prior
+    excludes.
+
+    NaN-safe by construction: null CSVs carry an all-NaN ``period`` column,
+    and the finite mask leaves an empty array rather than relying on
+    ``max``/``nanmax`` behaviour with NaN (MB3.4 -- ``np.nanmax`` of an
+    all-NaN array warns and returns NaN, and the old ``max(4.0, nan)``
+    returned 4.0 only because of Python's argument order).
+    """
+    period_max = float(period_max)
+    if not np.isfinite(period_max) or period_max <= 0:
+        raise ValueError(f"period_max must be finite and > 0, got {period_max}")
+    if "period" in getattr(df, "columns", ()):
+        injected = np.asarray(df["period"], dtype=float)
+        injected = injected[np.isfinite(injected)]
+        if injected.size and injected.max() >= period_max:
+            raise ValueError(
+                f"scenario injects periods up to {injected.max():g} yr, "
+                f"outside the sine period prior (upper bound {period_max:g} "
+                f"yr). Raise --period-max AND rerun the matching null "
+                f"campaign with the same value, or the two are not "
+                f"comparable (MB3.1)."
+            )
+    return period_max
 
 
 MODEL_FILE_NAMES = {
@@ -115,7 +164,14 @@ MODEL_FILE_NAMES = {
 
 def bend_pl(f, norm, f_bend, alpha_lo, alpha_hi, sharpness):
     """Bending power law used to generate the data (f in day^-1, alpha_hi
-    negative for a falling high-frequency slope)."""
+    negative for a falling high-frequency slope).
+
+    At ``sharpness = 1`` this is exactly Pioran's ``SingleBendingPowerLaw``
+    (sign convention alpha_model = -alpha_here), so injection and the fitted
+    OBPL share one PSD family -- which is what the campaign CSVs now set.
+    Pioran has no sharpness parameter, so any other value makes the OBPL
+    model unable to represent the simulated knee (defect MB3.5).
+    """
     return (norm * (f / f_bend) ** alpha_lo) / (
         1.0 + (f / f_bend) ** (sharpness * (alpha_lo - alpha_hi))
     ) ** (1.0 / sharpness)
@@ -306,16 +362,33 @@ def obpl_components(t):
     return band, n, err
 
 
-def build_models(t, cfg, want=("drw", "carma", "obpl"), photometric_bands=None):
+def build_models(
+    t,
+    cfg,
+    want=("drw", "carma", "obpl"),
+    photometric_bands=None,
+    fit_sine_colour=False,
+    reference_band=None,
+    survey="lsst",
+):
     """Return {file_model_name: ModelSpec} for the requested noise families.
 
     ``photometric_bands`` (non-reference band names, ``BandEncoding.others``
     order) builds multi-band models with per-band ``a_b``/``mu_b``; None
     (default) builds ordinary single-band models, unchanged.
+
+    ``fit_sine_colour`` adds ONE parameter, ``beta_sine``, giving the periodic
+    component its own colour dependence independent of the red noise's. Costs
+    a single dimension however many filters there are.
     """
     families = {}
     n_comp = None
-    mb = {"photometric_bands": photometric_bands}
+    mb = {
+        "photometric_bands": photometric_bands,
+        "fit_sine_colour": fit_sine_colour,
+        "reference_band": reference_band,
+        "survey": survey,
+    }
     if "drw" in want:
         families["drw"] = pp.build_family("drw", cfg, variants=("plain", "sine"), **mb)
     if "carma" in want:
@@ -411,6 +484,16 @@ def main():
         "evidence estimate. Use ~8000000 with --multiband on LSST cadences.",
     )
     ap.add_argument(
+        "--fit-sine-colour",
+        action="store_true",
+        help="fit beta_sine: give the periodic component its own per-band "
+        "amplitude c_b = (lambda_b/lambda_ref)**-beta_sine, independent of "
+        "the red noise's a_b. Without it c_b = a_b, so the sine and the noise "
+        "share a colour and multi-band data cannot distinguish a real signal "
+        "from red-noise leakage. Costs ONE extra dimension regardless of the "
+        "number of filters. Requires --multiband.",
+    )
+    ap.add_argument(
         "--checkpoint-dir",
         default=None,
         help="enable ultranest on-disk checkpointing under this directory "
@@ -419,6 +502,15 @@ def main():
         "existing integration instead of restarting it. Costs disk, but for "
         "long multi-band fits it is the difference between extending a run "
         "and throwing it away.",
+    )
+    ap.add_argument(
+        "--period-max",
+        type=float,
+        default=PERIOD_PRIOR[1],
+        help="upper bound (years) of the sine period prior. THE SAME VALUE "
+        "MUST be used for a null campaign and the signal campaign it "
+        "calibrates, or their Bayes factors are not comparable (MB3.1); the "
+        f"default {PERIOD_PRIOR[1]} yr is the campaign-wide convention.",
     )
     args = ap.parse_args()
 
@@ -433,9 +525,7 @@ def main():
         )
     cadence_lib = CadenceLibrary.from_cache(args.cadence_library) if args.cadence_library else None
 
-    period_max = 4.0
-    if "period" in df.columns:
-        period_max = max(period_max, float(df["period"].max()) + 0.5)
+    period_max = resolve_period_prior(df, args.period_max)
     cfg = make_cfg(period_max)
 
     picked = (
@@ -487,7 +577,17 @@ def main():
 
         need = {fn.split("_")[0] for fn in todo}
         specs, n_comp = build_models(
-            t, cfg, want=need, photometric_bands=photometric_bands
+            t,
+            cfg,
+            want=need,
+            photometric_bands=photometric_bands,
+            fit_sine_colour=args.fit_sine_colour and photometric_bands is not None,
+            reference_band=None if encoding is None else encoding.reference,
+            survey=(
+                str(row["cadence_source"]).split(":", 1)[0]
+                if has_real_cadence(row)
+                else "lsst"
+            ),
         )
 
         for fn in todo:

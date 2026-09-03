@@ -159,20 +159,29 @@ def fit_curves(results_dir, source, model, t, y, yerr, rng):
         )
         draw_curves.append(mu_i)
 
+    # Sine coefficients were renamed A1/A2 -> A_cos/A_sin on 2026-09-03
+    # (fix MB2). Result files written before then use the old keys, and
+    # single-band results from before the rename remain scientifically
+    # valid, so both spellings must load.
+    cos_key, sin_key = ("A_cos", "A_sin") if "A_cos" in samples else ("A1", "A2")
+
     sine_curves = None
     sine_median = None
     if "sine" in meta["variant"]:
         sine_curves = [
             sine_mean(
                 t_grid,
-                float(samples["A1"][i]),
-                float(samples["A2"][i]),
+                float(samples[cos_key][i]),
+                float(samples[sin_key][i]),
                 float(samples["period"][i]),
             )
             for i in idx
         ]
         sine_median = sine_mean(
-            t_grid, median_params["A1"], median_params["A2"], median_params["period"]
+            t_grid,
+            median_params[cos_key],
+            median_params[sin_key],
+            median_params["period"],
         )
 
     return (

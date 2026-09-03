@@ -48,6 +48,9 @@ CFG_1302 = PriorConfig(
     log10_fbend=(-2.0, 1.5),  # yr^-1
     alpha_low=(-0.25, 2.0),
     alpha_high_max=4.0,
+    # relative prior: f = A / sigma_process (see PriorConfig). 0.08 is the
+    # legacy absolute scale, retained as the CARMA fallback.
+    sine_amplitude_fraction=1.2,
     sine_amplitude_scale=0.08,
     period=(0.1, 6.67),
     err_scale=(0.05, 1.5),
@@ -57,6 +60,7 @@ CFG_1553 = PriorConfig(
     log10_fbend=(-3.0, 1.0),
     alpha_low=(-0.25, 2.0),
     alpha_high_max=4.0,
+    sine_amplitude_fraction=1.2,
     sine_amplitude_scale=0.3,
     period=(0.1, 8.0),
     slope=(-2.0, 2.0),

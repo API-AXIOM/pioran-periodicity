@@ -47,7 +47,13 @@ from .kernels import (
     obpl_kernel,
     psd_approximation_error,
 )
-from .means import combine_means, linear_mean, sine_amplitude_phase, sine_mean
+from .means import (
+    combine_means,
+    linear_mean,
+    sine_amplitude,
+    sine_amplitude_phase,
+    sine_mean,
+)
 from .models import ModelFamily, ModelSpec, PriorConfig, build_family
 from .priors import (
     ConditionalUniform,
@@ -69,6 +75,7 @@ __all__ = [
     "PriorTransform",
     "sine_mean",
     "linear_mean",
+    "sine_amplitude",
     "sine_amplitude_phase",
     "combine_means",
     "FrequencyBand",

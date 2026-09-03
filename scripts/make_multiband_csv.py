@@ -48,8 +48,10 @@ from make_real_cadence_csv import (  # noqa: E402
 
 # Campaign axes (2026-08-18 design discussion).
 BETAS = (0.0, 0.35, 0.7)
-NULL_HIGHALPHA = (-2.0, -4.0)
-SIGNAL_HIGHALPHA = (-4.0,)
+# -3.5 rather than -4.0: a fitted alpha_high of 4.0 sits exactly on the
+# prior bound, which is itself the SHO/n=20 basis-accuracy limit (MB3.2).
+NULL_HIGHALPHA = (-2.0, -3.5)
+SIGNAL_HIGHALPHA = (-3.5,)
 SIGNAL_A1 = (0.24, 0.3675, 0.53)
 SIGNAL_PERIOD = 3.75  # yr; well inside the prior and the best-mapped axis
 
