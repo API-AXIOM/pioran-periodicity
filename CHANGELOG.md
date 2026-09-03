@@ -4,6 +4,48 @@ All notable changes to `pioran_periodicity`. Analysis-level decisions (prior
 choices, leakage acceptance, per-run scope) are recorded separately in
 `comparison_reports/changes_and_decisions.md`.
 
+## [0.3.0] — 2026-09-03
+
+Breaking. Adds one sampled parameter to **every** model.
+
+### Changed
+- The process mean is now **fitted, not fixed**. Every model previously had
+  its constant offset fixed by subtracting `np.median(y)` (or the reference
+  band's median) before evaluating a hard zero-mean GP. Fixing it at a
+  data-derived point estimate discards that estimate's own uncertainty, which
+  is entangled with the same red-noise kernel parameters — `log10_fbend` in
+  particular — that the fit is trying to recover, giving overconfident
+  timescale posteriors. `mu0 ~ Normal(0, process_mean_scale)` is now present
+  in every variant and fit jointly with the kernel:
+  single-band it is added to the mean function; multi-band it becomes
+  `band_mu[0]`, the reference band's own absolute offset (previously
+  hardcoded 0.0). `a_ref = 1` remains pinned — a separate identifiability
+  constraint against `log10_variance`.
+  Median-centring is deliberately **kept**: it is a change of origin chosen
+  for conditioning, not a statistical assumption, and `mu0` is the offset
+  relative to it. Removing the centring would require a prior spanning the
+  data's absolute level (~19 mag for real photometry).
+- `linear` / `sine+linear` variants drop `intercept`, with which `mu0` would
+  be exactly degenerate. `PriorConfig.intercept` is removed.
+- Costs one dimension on every model (~1.2–1.3× per fit). Null and
+  alternative both carry it, so Bayes factors are largely unaffected.
+
+### Fixed
+- `scripts/run_realdata.py` passed an `intercept=` kwarg to `PriorConfig`
+  that no longer exists — a breakage nothing caught because no test imported
+  the module. Added a test that the campaign configs construct.
+
+### Notes
+- Tests cover that `mu0` is wired correctly: present in every variant, the
+  same shared `Parameter` object across variants (M1/B4), applied on the
+  correct side of the `a_b` rescale (it is in observed units, so it belongs
+  in `band_mu[0]` and never in `mean_func`, which is scaled by `a_b`), and
+  that fits run end to end. They deliberately do **not** attempt to verify
+  the statistical claim about `log10_fbend` coverage.
+- Supersedes the unmerged `fix/free-mean-parameter` (734b785), which dropped
+  the centring and built `mu0` inside the per-variant loop, breaking the
+  M1/B4 invariant.
+
 ## [0.2.0] — 2026-09-03
 
 Breaking. Renamed sampled parameters, changed prior families, and changed
