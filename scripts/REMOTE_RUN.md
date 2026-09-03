@@ -191,6 +191,33 @@ anyway, since it only checks for a terminal state, not which one:
 grep -L "finished cleanly" $ROOT/simulations/*/logs/*.log
 ```
 
+### Hung workers (not crashes) — the stall watchdog
+
+A crashing worker is restarted by its supervisor. A worker that *hangs
+without exiting* is not: on 2026-08-31 a Julia GC stall inside
+`ijl_gc_collect` wedged 8 of 12 workers, each holding ~90% CPU while writing
+nothing for 30+ hours, and the campaign silently produced nothing for a day
+while looking busy. `ps` showed live, hard-working processes throughout.
+
+`run_workers.sh` now starts `scripts/watchdog.py` automatically (set
+`WATCHDOG=false` to opt out). It SIGKILLs any worker whose checkpoint has not
+advanced for `WATCHDOG_STALL_MIN` minutes (default 45); the supervisor then
+restarts it and the fit resumes from `points.hdf5`. It needs `python3` on
+PATH (stdlib only) and is most useful with `CHECKPOINT_DIR` set — without
+checkpointing, a kill throws away the whole fit.
+
+```bash
+# did the watchdog have to kill anything?
+grep KILL $ROOT/simulations/<campaign>/logs/watchdog.log
+
+# is it running? (it exits by design once a campaign's workers are gone)
+pgrep -fl watchdog.py
+```
+
+Repeated kills on the same campaign mean the GC stall is recurring rather
+than being a one-off; the next lever to try there is
+`JULIA_NUM_GC_THREADS=1`, which does not change results numerically.
+
 ## 6. Not part of this campaign
 
 Aggregation (`scripts/aggregate_results.py`) and plotting

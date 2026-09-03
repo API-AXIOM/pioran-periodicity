@@ -42,6 +42,19 @@
 #                  than throwaway; needs h5py. Recommended for any run where
 #                  a single fit takes more than a few minutes.
 #
+#   WATCHDOG       true/false, start scripts/watchdog.py alongside the
+#                  workers (default: true). The supervisor loop below only
+#                  restarts a worker that *exits*; it cannot see one that
+#                  hangs without exiting, which is what Julia GC stalls do
+#                  (8 of 12 workers lost that way on 2026-08-31, each
+#                  burning ~90% CPU for 30+ h while writing nothing).
+#                  Needs a python3 on PATH (stdlib only) and is most useful
+#                  with CHECKPOINT_DIR set, so a killed fit resumes.
+#   WATCHDOG_STALL_MIN  minutes without checkpoint progress before a worker
+#                  is SIGKILLed (default: 45). Must exceed the slowest
+#                  normal gap between checkpoint writes.
+#   WATCHDOG_POLL  watchdog poll interval in seconds (default: 300)
+#
 # Usage (from anywhere; launches all workers detached, then returns):
 #   ./run_workers.sh <data-dir> <csv-path> <n-workers>
 # <csv-path> may be a bare filename (resolved relative to <data-dir>) or a
@@ -65,6 +78,9 @@ CONDA_ENV="${CONDA_ENV:-pioran-periodicity}"
 MULTIBAND="${MULTIBAND:-false}"
 MAX_NCALLS="${MAX_NCALLS:-}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-}"
+WATCHDOG="${WATCHDOG:-true}"
+WATCHDOG_STALL_MIN="${WATCHDOG_STALL_MIN:-45}"
+WATCHDOG_POLL="${WATCHDOG_POLL:-300}"
 
 case "$CSV" in
     /*) CSV_PATH="$CSV" ;;
@@ -121,4 +137,22 @@ for ((I = 0; I < NWORKERS; I++)); do
     nohup "$0" "$DATA" "$CSV" "$NWORKERS" "$I" </dev/null >/dev/null 2>&1 &
     disown
 done
+# Stall watchdog. The per-worker supervisor above restarts run_sim.py when it
+# *exits* (e.g. a Julia GC segfault); a worker that hangs without exiting is
+# invisible to it. watchdog.py kills a worker whose checkpoint has stopped
+# advancing so that supervisor can do its job. One watchdog covers a data dir,
+# so don't start a second when extending a campaign with another CSV.
+if [ "$WATCHDOG" = "true" ]; then
+    if pgrep -f "watchdog.py $DATA" >/dev/null 2>&1; then
+        echo "Stall watchdog already running for $DATA"
+    elif ! command -v python3 >/dev/null 2>&1; then
+        echo "WARNING: python3 not found -- stall watchdog NOT started; a hung worker will go unnoticed" >&2
+    else
+        nohup python3 "$SCRIPT_DIR/watchdog.py" "$DATA" \
+            --stall-min "$WATCHDOG_STALL_MIN" --poll "$WATCHDOG_POLL" \
+            </dev/null >/dev/null 2>&1 &
+        disown
+        echo "Started stall watchdog (stall_min=${WATCHDOG_STALL_MIN}min, log: $DATA/logs/watchdog.log)"
+    fi
+fi
 echo "Launched $NWORKERS workers (models=$MODELS, multiband=$MULTIBAND, max_ncalls=${MAX_NCALLS:-default}, env=$CONDA_ENV) against $CSV_PATH (logs: $DATA/logs/sim_${TAG}_w*.log)"
