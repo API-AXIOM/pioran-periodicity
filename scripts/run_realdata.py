@@ -64,7 +64,7 @@ CFG_1553 = PriorConfig(
     sine_amplitude_scale=0.3,
     period=(0.1, 8.0),
     slope=(-2.0, 2.0),
-    intercept=(-2.0, 2.0),
+    # no intercept: the constant term is mu0 (free in every variant)
     err_scale=(0.05, 1.5),
 )
 

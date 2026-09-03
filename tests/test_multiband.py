@@ -313,6 +313,7 @@ class TestMultibandFamily:
         pdict = {
             "log10_variance": -0.5,
             "log10_fbend": -1.0,
+            "mu0": -0.3,  # reference band's own offset, band_mu[0]
             "a_g": 1.6,
             "mu_g": 0.2,
         }
@@ -324,7 +325,7 @@ class TestMultibandFamily:
             yerr,
             band,
             np.array([1.0, 1.6]),
-            np.array([0.0, 0.2]),
+            np.array([-0.3, 0.2]),
         )
         assert got == pytest.approx(ref, rel=1e-10)
 
@@ -337,7 +338,7 @@ class TestMultibandFamily:
         t = np.sort(rng.uniform(0, 50, n)) + np.arange(n) * 1e-9
         y = rng.normal(0, 1, n)
         yerr = np.full(n, 0.05)
-        pdict = {"log10_variance": -0.5, "log10_fbend": -1.0}
+        pdict = {"log10_variance": -0.5, "log10_fbend": -1.0, "mu0": 0.0}
         got = spec.loglike(pdict, t, y, yerr, None)
         ref = gp_log_likelihood(drw_kernel(-0.5, -1.0), t, y, yerr, mean_func=None)
         assert got == pytest.approx(ref, rel=1e-12)
@@ -358,7 +359,9 @@ def test_run_nested_multiband_tiny():
         "drw", PriorConfig(), variants=("plain",), photometric_bands=("g",)
     )["drw"]
     settings = SamplerSettings(
-        min_num_live_points=50, max_ncalls=20000, frac_remain=0.1, seed=42
+        # 40000, not 20000: mu0 added a dimension to every model and the
+        # old cap truncated this deliberately-tiny run
+        min_num_live_points=50, max_ncalls=40000, frac_remain=0.1, seed=42
     )
     res = run_nested(
         spec,
@@ -477,6 +480,7 @@ class TestCadenceToMultibandSeries:
         pdict = {
             "log10_variance": -0.5,
             "log10_fbend": -1.0,
+            "mu0": 0.05,
             "a_g": 1.2,
             "mu_g": 0.1,
             "a_i": 0.8,
@@ -705,7 +709,7 @@ class TestFitBandMeans:
         names = set(spec.param_names)
         assert {"a_g", "a_i"} <= names
         assert not any(n.startswith("mu_") for n in names)
-        assert spec.prior.ndim == 4  # 2 noise + 2 amplitudes
+        assert spec.prior.ndim == 5  # 2 noise + mu0 + 2 amplitudes
 
     def test_default_still_fits_means(self):
         spec = build_family(
@@ -738,7 +742,7 @@ class TestFitBandMeans:
         fixed = build_family(
             "drw", PriorConfig(), fit_band_means=False, **common
         )["drw"]
-        base = {"log10_variance": -0.5, "log10_fbend": -1.0, "a_g": 1.4}
+        base = {"mu0": 0.0, "log10_variance": -0.5, "log10_fbend": -1.0, "a_g": 1.4}
         got = fixed.loglike(base, t, y, yerr, band)
         ref = free.loglike({**base, "mu_g": 0.0}, t, y, yerr, band)
         assert got == pytest.approx(ref, rel=1e-12)

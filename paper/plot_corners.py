@@ -35,6 +35,7 @@ LABELS = {
     "log10_fbend": r"$\log_{10} f_\mathrm{bend}$",
     "alpha_low": r"$\alpha_\mathrm{low}$",
     "alpha_high": r"$\alpha_\mathrm{high}$",
+    "mu0": r"$\mu_0$",
     "A_cos": r"$A_\mathrm{cos}$",
     "A_sin": r"$A_\mathrm{sin}$",
     # legacy spellings (results written before the 2026-09-03 rename, MB2)

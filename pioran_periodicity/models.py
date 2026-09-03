@@ -96,9 +96,18 @@ class PriorConfig:
     # the single number log(hi/lo)). Lower bound must be > 0 (fix M5).
     period: tuple[float, float] = (0.05, 5.0)
 
-    # linear-trend mean
+    # Process mean mu0 ~ Normal(0, process_mean_scale), present in EVERY
+    # model variant. The data is still median-centred before fitting (a
+    # change of origin, chosen for conditioning), so mu0 is the offset
+    # RELATIVE to that centring -- it marginalises over the uncertainty in
+    # the centring estimate instead of fixing it at a point value. Fixing it
+    # discards uncertainty that is entangled with the kernel parameters,
+    # log10_fbend in particular, giving overconfident timescale posteriors.
+    process_mean_scale: float = 0.5
+
+    # linear-trend mean. No intercept: the constant term IS mu0, so fitting
+    # both would be exactly degenerate.
     slope: tuple[float, float] = (-2.0, 2.0)
-    intercept: tuple[float, float] = (-2.0, 2.0)
 
     # optional error-bar rescale nu; None disables the parameter.
     # Lower bound must be > 0 (fix S2-real: nu = 0 collapses the GP diagonal).
@@ -143,6 +152,8 @@ class PriorConfig:
             raise ValueError("sine_amplitude_scale must be > 0")
         if self.sine_colour_scale <= 0:
             raise ValueError("sine_colour_scale must be > 0")
+        if self.process_mean_scale <= 0:
+            raise ValueError("process_mean_scale must be > 0")
 
 
 # ---------------------------------------------------------------------------
@@ -278,10 +289,8 @@ def _mean_parameters(
             Parameter("period", LogUniform(*cfg.period)),
         ]
     if "linear" in variant:
-        params += [
-            Parameter("slope", Uniform(*cfg.slope)),
-            Parameter("intercept", Uniform(*cfg.intercept)),
-        ]
+        # constant term omitted deliberately: mu0 provides it
+        params += [Parameter("slope", Uniform(*cfg.slope))]
     return params
 
 
@@ -359,6 +368,15 @@ def _kernel_builder(
 
 
 def _mean_builder(variant: str):
+    """The SHAPE of the mean function, excluding the constant offset.
+
+    ``mu0`` is deliberately not included here. In the multi-band model the
+    mean function is evaluated in shared-latent units and is therefore
+    scaled by ``a_b``; a constant offset must NOT be, since it is the
+    reference band's absolute level in observed units. So mu0 is applied by
+    the likelihood closure -- added to the mean for single-band fits, and
+    placed in ``band_mu[0]`` for multi-band ones.
+    """
     if variant == "plain":
         return lambda p: None
     if variant == "sine":
@@ -366,13 +384,20 @@ def _mean_builder(variant: str):
             lambda t: sine_mean(t, p["A_cos"], p["A_sin"], p["period"])
         )
     if variant == "linear":
-        return lambda p: (lambda t: linear_mean(t, p["slope"], p["intercept"]))
+        return lambda p: (lambda t: linear_mean(t, p["slope"], 0.0))
     if variant == "sine+linear":
         return lambda p: combine_means(
             lambda t: sine_mean(t, p["A_cos"], p["A_sin"], p["period"]),
-            lambda t: linear_mean(t, p["slope"], p["intercept"]),
+            lambda t: linear_mean(t, p["slope"], 0.0),
         )
     raise ValueError(f"unknown variant '{variant}'")
+
+
+def _with_constant(mu0: float, shape_mean):
+    """Add the constant ``mu0`` on top of a (possibly absent) shape mean."""
+    if shape_mean is None:
+        return lambda t: mu0 * np.ones_like(np.asarray(t, dtype=np.float64))
+    return lambda t: mu0 + np.asarray(shape_mean(t), dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -462,10 +487,17 @@ def build_family(
         else []
     )
 
+    # Constructed ONCE and shared by every variant, like noise_params and
+    # band_params: mu0 appears in all of them, so building it inside the
+    # variant loop would give the null and periodic models distinct prior
+    # objects and break the M1/B4 invariant.
+    mu0_param = Parameter("mu0", Normal(0.0, cfg.process_mean_scale))
+
     members: dict[str, ModelSpec] = {}
     for variant in variants:
         params = (
             list(noise_params)
+            + [mu0_param]
             + list(band_params)
             + _mean_parameters(variant, cfg, noise)
             + (
@@ -490,19 +522,29 @@ def build_family(
             _sine_wl_ratios=sine_wl_ratios,
         ):
             kernel = _kernel_of(pdict)
-            mean_func = _mean_of(pdict)
+            shape_mean = _mean_of(pdict)
+            mu0 = pdict["mu0"]
             err_scale = pdict.get("err_scale", 1.0)
             if band is None:
+                # single band: the constant is just part of the mean
                 return gp_log_likelihood(
-                    kernel, t, y, yerr, mean_func=mean_func, err_scale=err_scale,
+                    kernel,
+                    t,
+                    y,
+                    yerr,
+                    mean_func=_with_constant(mu0, shape_mean),
+                    err_scale=err_scale,
                 )
+            # multi band: mu0 is the reference band's absolute offset, in
+            # OBSERVED units, so it belongs in band_mu[0] -- NOT in
+            # mean_func, which is in latent units and gets scaled by a_b
+            mean_func = shape_mean
             # (n_bands,), index 0 is the pinned reference band (a=1, mu=0)
             band_amp = np.array(
                 [1.0] + [pdict[f"a_{b}"] for b in _photometric_bands]
             )
             band_mu = np.array(
-                [0.0]
-                + [pdict.get(f"mu_{b}", 0.0) for b in _photometric_bands]
+                [mu0] + [pdict.get(f"mu_{b}", 0.0) for b in _photometric_bands]
             )
             # c_b for the periodic component; None => c_b = a_b
             band_mean_amp = None

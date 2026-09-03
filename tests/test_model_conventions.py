@@ -881,3 +881,121 @@ class TestSineColourIndex:
             k, t, y, yerr, code, amp, mu, mean_func=big, band_mean_amp=np.ones(3)
         )
         assert abs(leak - achrom) > 1.0
+
+
+class TestFreeProcessMean:
+    """mu0: the process mean is fitted, not fixed at a data-derived value.
+
+    Scope note: these tests check the parameter is WIRED CORRECTLY -- present
+    everywhere, shared, and applied on the right side of the a_b rescale.
+    They deliberately do NOT attempt to verify the statistical claim (that
+    marginalising over the offset improves log10_fbend coverage); that rests
+    on the literature, not on this suite.
+    """
+
+    def _fam(self, **kw):
+        return build_family("drw", PriorConfig(), **kw)
+
+    def test_present_in_every_variant_including_plain(self):
+        fam = self._fam(variants=("plain", "sine", "linear", "sine+linear"))
+        for name, spec in fam.members.items():
+            assert "mu0" in spec.param_names, name
+
+    def test_prior_object_is_shared_across_variants(self):
+        """M1/B4: a parameter common to several variants must be the SAME
+        object, so a null model and its periodic alternative can never
+        disagree about its prior. Building mu0 inside the variant loop breaks
+        this -- it is what made the earlier free-mean attempt fail three
+        tests."""
+        fam = self._fam(variants=("plain", "sine", "linear", "sine+linear"))
+
+        def prior_of(spec):
+            return spec.prior.parameters[spec.param_names.index("mu0")].prior
+
+        priors = [prior_of(s) for s in fam.members.values()]
+        assert all(p is priors[0] for p in priors)
+
+    def test_intercept_is_gone_and_subsumed_by_mu0(self):
+        """A separate intercept would be exactly degenerate with mu0."""
+        fam = self._fam(variants=("linear", "sine+linear"))
+        for spec in fam.members.values():
+            assert "intercept" not in spec.param_names
+            assert "slope" in spec.param_names and "mu0" in spec.param_names
+
+    def test_single_band_mu0_shifts_in_observed_units(self, synthetic):
+        """loglike(y, mu0=c) must equal loglike(y-c, mu0=0)."""
+        t, y, yerr = synthetic
+        spec = self._fam(variants=("plain",))["drw"]
+        base = dict(log10_variance=-0.5, log10_fbend=-1.0)
+        c = 0.37
+        shifted = spec.loglike(dict(base, mu0=c), t, y, yerr)
+        recentred = spec.loglike(dict(base, mu0=0.0), t, y - c, yerr)
+        assert shifted == pytest.approx(recentred, rel=1e-12)
+
+    def test_mu0_actually_changes_the_likelihood(self, synthetic):
+        t, y, yerr = synthetic
+        spec = self._fam(variants=("plain",))["drw"]
+        base = dict(log10_variance=-0.5, log10_fbend=-1.0)
+        assert abs(
+            spec.loglike(dict(base, mu0=0.0), t, y, yerr)
+            - spec.loglike(dict(base, mu0=0.8), t, y, yerr)
+        ) > 1e-3
+
+    def test_multiband_mu0_is_the_reference_band_offset_not_scaled_by_a_b(
+        self, mb_data
+    ):
+        """The subtlety: mu0 is in OBSERVED units, so it belongs in
+        band_mu[0]. Putting it in mean_func instead would scale it by a_b,
+        because the mean function is evaluated in shared-latent units."""
+        t, y, yerr, code, amp, mu = mb_data
+        spec = build_family(
+            "drw", PriorConfig(), variants=("plain",), photometric_bands=("g", "i")
+        )["drw"]
+        mu0 = -0.3
+        pdict = {
+            "log10_variance": LOG10_VAR, "log10_fbend": LOG10_FBEND, "mu0": mu0,
+            "a_g": amp[1], "mu_g": mu[1], "a_i": amp[2], "mu_i": mu[2],
+        }
+        got = spec.loglike(pdict, t, y, yerr, code)
+        # reference: dense MVN with mu0 as the reference band's own offset
+        band_mu = np.array([mu0, mu[1], mu[2]])
+        cov = (amp[code][:, None] * amp[code][None, :]) * _drw_cov(t) + np.diag(
+            yerr**2
+        )
+        want = float(multivariate_normal.logpdf(y, mean=band_mu[code], cov=cov))
+        assert got == pytest.approx(want, abs=1e-8)
+        # and it is NOT the a_b-scaled version
+        wrong = float(
+            multivariate_normal.logpdf(
+                y, mean=band_mu[code] + (amp[code] - 1.0) * mu0, cov=cov
+            )
+        )
+        assert abs(want - wrong) > 0.5, "degenerate input"
+        assert got != pytest.approx(wrong, abs=1e-6)
+
+    def test_rejects_non_positive_scale(self):
+        with pytest.raises(ValueError, match="process_mean_scale must be > 0"):
+            PriorConfig(process_mean_scale=0.0)
+
+    @pytest.mark.parametrize("module", ["run_sim", "run_realdata"])
+    def test_campaign_configs_still_construct(self, module):
+        """Guards the breakage this change caused once: run_realdata passed an
+        `intercept=` kwarg that no longer exists, and nothing imported it."""
+        pytest.importorskip(module, reason="scripts/ not importable")
+
+    @pytest.mark.slow
+    def test_runs_end_to_end(self, synthetic):
+        """It has to actually run, not just build."""
+        pytest.importorskip("ultranest")
+        from pioran_periodicity.inference import SamplerSettings, run_nested
+
+        t, y, yerr = synthetic
+        spec = self._fam(variants=("plain",))["drw"]
+        r = run_nested(
+            spec, t, y, yerr,
+            settings=SamplerSettings(min_num_live_points=50, seed=7),
+            show_status=False,
+        )
+        assert np.isfinite(r.logz)
+        assert "mu0" in r.samples
+        assert len(r.samples["mu0"]) > 0

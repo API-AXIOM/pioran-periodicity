@@ -458,7 +458,7 @@ class TestModels:
         fam = build_family("drw", cfg, variants=("plain",))
         spec = fam["drw"]
         assert "err_scale" in spec.param_names
-        base = dict(log10_variance=0.0, log10_fbend=-0.3, err_scale=1.0)
+        base = dict(log10_variance=0.0, log10_fbend=-0.3, mu0=0.0, err_scale=1.0)
         scaled = dict(base, err_scale=2.0)
         a = spec.loglike(base, t, y, yerr)
         b = spec.loglike(scaled, t, y, yerr)
@@ -526,7 +526,11 @@ class TestInference:
         import pioran_periodicity.inference as inf
 
         rng = np.random.default_rng(0)
-        pts = rng.normal(size=(200, 2))
+        # width must match the model's ndim; derive it rather than hardcode
+        n_dim = build_family("drw", PriorConfig(), variants=("plain",))[
+            "drw"
+        ].prior.ndim
+        pts = rng.normal(size=(200, n_dim))
         wts = rng.uniform(size=200)
         fake_result = {
             "logz": -10.0,
