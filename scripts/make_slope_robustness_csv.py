@@ -30,7 +30,8 @@ cadence.
 
     # custom amplitude triad, e.g. recalibrated for a different cadence
     conda run -n <env> python scripts/make_slope_robustness_csv.py \\
-        --variant signal --period-a1 "2.0:0.05,0.2,0.4" --out custom.csv
+        --variant signal --period-a1 "2.0:0.054,0.217,0.434" --out custom.csv
+    # (period in years, amplitudes in MAGNITUDES -- see FIXED_HELP)
 
     # scale a completed 20-rep pilot up to 100 reps/cell: a non-overlapping
     # extension CSV (--rep-start = the pilot's --n-per-cell, a fresh
@@ -48,7 +49,11 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG, MAGNITUDE_UNITS
+from pioran_periodicity.simulate import (
+    FRACTIONAL_FLUX_TO_MAG,
+    MAGNITUDE_UNITS,
+    flux_amplitude_to_mag,
+)
 
 # Steepest value is -3.5, NOT -4.0. The fitted OBPL slope is
 # alpha_high = -highalpha, and the prior is alpha_high ~ U(alpha_low, 4.0);
@@ -85,7 +90,7 @@ PERIOD_A1_FLUX = {
     7.5: [0.1125, 0.53, 0.75],
 }
 PERIOD_A1_DEFAULT = [
-    f"{period}:" + ",".join(f"{a1 * FRACTIONAL_FLUX_TO_MAG:.5g}" for a1 in a1_list)
+    f"{period}:" + ",".join(str(flux_amplitude_to_mag(a1)) for a1 in a1_list)
     for period, a1_list in PERIOD_A1_FLUX.items()
 ]
 
@@ -134,8 +139,27 @@ CSV_COLUMNS = [
 ]
 
 
+# Units for the auto-generated --<column> overrides. `rms` and `noiseSIGMA`
+# are MAGNITUDES since 2026-09-04, as are the --period-a1 amplitudes. The
+# `units` column stamped on the output always reads "mag", so a command line
+# reusing flux-era numbers (--rms 0.15, --noiseSIGMA 0.015) produces a CSV
+# that run_sim.py's guard ACCEPTS while injecting 8% less variability than
+# intended -- the guard protects the file format, not the values a human
+# types. Spelling the unit out in --help is what closes that gap.
+FIXED_HELP = {
+    "rms": "process rms, in MAGNITUDES (flux-era 0.15 -> %(default).4f mag)",
+    "noiseSIGMA": (
+        "per-epoch photometric noise, in MAGNITUDES "
+        "(flux-era 0.015 -> %(default).4f mag)"
+    ),
+}
+
+
 def parse_period_a1(specs: list[str]) -> dict[float, list[float]]:
-    """``["1.25:0.1,0.2", "3.75:0.05,0.3"]`` -> ``{1.25: [0.1, 0.2], ...}``"""
+    """``["1.25:0.1,0.2", "3.75:0.05,0.3"]`` -> ``{1.25: [0.1, 0.2], ...}``
+
+    Amplitudes are MAGNITUDES (see FIXED_HELP).
+    """
     out = {}
     for spec in specs:
         period_str, a1_str = spec.split(":")
@@ -213,6 +237,7 @@ def main():
         action="append",
         default=None,
         help='signal variant only, repeatable: "PERIOD:A1_1,A1_2,..." '
+        "with the period in YEARS and the amplitudes in MAGNITUDES "
         f"(default: {PERIOD_A1_DEFAULT})",
     )
     ap.add_argument(
@@ -229,7 +254,10 @@ def main():
     ap.add_argument("--first-id", type=int, default=0)
     ap.add_argument("--seed", type=int, default=20260728)
     for col, default in FIXED_DEFAULTS.items():
-        ap.add_argument(f"--{col}", type=type(default), default=default)
+        ap.add_argument(
+            f"--{col}", type=type(default), default=default,
+            help=FIXED_HELP.get(col, "(default: %(default)s)"),
+        )
     args = ap.parse_args()
 
     highalpha = [float(v) for v in args.highalpha.split(",")]

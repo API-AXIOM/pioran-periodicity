@@ -363,7 +363,7 @@ def gp_log_likelihood_multiband(
     periodic component then carries the same colour dependence as the red
     noise, which is what
     :func:`pioran_periodicity.simulate.sample_real_cadence` injects
-    (``flux += a * signal``), and the fitted amplitude is in reference-band
+    (``mag += a * signal``), and the fitted amplitude is in reference-band
     units.
 
     Passing an explicit ``band_mean_amp`` frees the periodic component's

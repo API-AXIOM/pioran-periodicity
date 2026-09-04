@@ -41,6 +41,7 @@ __all__ = [
     "MAG_TO_FRACTIONAL_FLUX",
     "FRACTIONAL_FLUX_TO_MAG",
     "MAGNITUDE_UNITS",
+    "flux_amplitude_to_mag",
 ]
 
 DAYS_PER_YEAR = 365.0
@@ -54,13 +55,25 @@ DAYS_PER_MONTH = 30.0
 MAG_TO_FRACTIONAL_FLUX = 0.4 * np.log(10.0)
 
 # 2.5/ln(10) = 1.0857. Multiply an amplitude expressed as a FRACTIONAL FLUX
-# rms by this to get the magnitude rms describing the SAME physical
-# variability: sigma_m = sigma_F/F / (0.4 ln 10). Campaign inputs calibrated
-# in flux (`rms`, `noiseSIGMA`, the injected `A1` triads) were scaled by it
-# when this module moved to magnitudes, so the physical amplitude -- and
-# hence the dimensionless f = A/sigma the sine prior is written in -- is
-# unchanged. Reading a flux-era 0.15 as "0.15 mag" instead would silently
-# shrink the injected variability by 8%.
+# rms by this to get the magnitude rms describing the same physical
+# variability TO FIRST ORDER: sigma_m = sigma_F/F / (0.4 ln 10). Campaign
+# inputs calibrated in flux (`rms`, `noiseSIGMA`, the injected `A1` triads)
+# were scaled by it when this module moved to magnitudes. Reading a flux-era
+# 0.15 as "0.15 mag" instead would silently shrink the injected variability
+# by 8%.
+#
+# First order is the honest caveat: Gaussian-in-flux and Gaussian-in-magnitude
+# are different distributions, not two unit systems, so no factor maps one
+# onto the other exactly. Converting an actual Gaussian-in-flux series with
+# fractional rms 0.15 gives std 0.1678 mag, 3% above the 0.1629 this constant
+# yields (the gap grows fast with amplitude: 0.3% at rms 0.05, 18% at 0.30).
+# The linearised factor is still the right choice, for two reasons:
+#   * what the sine prior is written in, f = A/sigma, is EXACTLY invariant
+#     under it, since amplitude and process rms are scaled together -- which
+#     is what carries the empirically calibrated detection powers across;
+#   * it is validated against real data, not against the old convention. The
+#     campaign PSD at sigma = 0.1629 mag yields std 0.115 mag over a
+#     ZTF-length window, against 0.113 mag measured in real ZTF photometry.
 FRACTIONAL_FLUX_TO_MAG = 1.0 / MAG_TO_FRACTIONAL_FLUX
 
 # Value of the `units` column that campaign config CSVs (and the `units`
@@ -68,6 +81,19 @@ FRACTIONAL_FLUX_TO_MAG = 1.0 / MAG_TO_FRACTIONAL_FLUX
 # scripts/run_sim.py. It exists so that inputs prepared for the old
 # fractional-flux simulator fail loudly instead of running 8% quiet.
 MAGNITUDE_UNITS = "mag"
+
+
+def flux_amplitude_to_mag(amplitude: float) -> float:
+    """Convert a fractional-flux amplitude to magnitudes for a campaign CSV.
+
+    Rounded to 5 significant figures so that every generator writes a
+    BIT-IDENTICAL value for the same calibrated input. Without a single
+    rounding rule the scripts drift apart in the 6th decimal (3e-6 mag --
+    physically nothing), and an exact groupby/join on ``A1`` across two
+    campaign CSVs then splits one amplitude into two nearly-equal bins,
+    quietly halving the counts per cell instead of failing.
+    """
+    return float(f"{amplitude * FRACTIONAL_FLUX_TO_MAG:.5g}")
 
 
 @dataclass

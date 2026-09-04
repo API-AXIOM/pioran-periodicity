@@ -14,7 +14,7 @@ model (``run_sim.py --multiband``):
 ``a_b = (lambda_b/lambda_ref)^(-beta)``, grounded in real quasar
 structure-function colour trends: beta=0.35 gives an LSST u/y amplitude
 contrast of 1.41, beta=0.7 gives 1.97. beta=0 is the control (identical
-flux in every band -- what Phase 4 already probed).
+variability in every band -- what Phase 4 already probed).
 
 NOTE beta=0 is NOT the same as omitting the column: it still records band
 identities and centres on the reference band, so it is a genuine multi-band
@@ -40,7 +40,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG, MAGNITUDE_UNITS
+from pioran_periodicity.simulate import MAGNITUDE_UNITS, flux_amplitude_to_mag
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_real_cadence_csv import (  # noqa: E402
@@ -57,7 +57,7 @@ SIGNAL_HIGHALPHA = (-3.5,)
 # Recorded in the fractional FLUX they were calibrated in, converted once to
 # the magnitudes the simulator now emits -- see make_slope_robustness_csv.py.
 SIGNAL_A1_FLUX = (0.24, 0.3675, 0.53)
-SIGNAL_A1 = tuple(a1 * FRACTIONAL_FLUX_TO_MAG for a1 in SIGNAL_A1_FLUX)
+SIGNAL_A1 = tuple(flux_amplitude_to_mag(a1) for a1 in SIGNAL_A1_FLUX)
 SIGNAL_PERIOD = 3.75  # yr; well inside the prior and the best-mapped axis
 
 CSV_COLUMNS = [

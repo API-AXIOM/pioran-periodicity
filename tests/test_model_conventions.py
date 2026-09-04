@@ -565,6 +565,36 @@ class TestAmplitudeUnitConversion:
             for got, want in zip(parsed[period], flux_a1):
                 assert got / rms_mag == pytest.approx(want / 0.15, rel=1e-4)
 
+    def test_generators_agree_bit_for_bit_on_the_same_amplitude(self):
+        """Both campaigns inject A1 = 0.24 (flux-era). If the two generators
+        round differently, an exact groupby/join on A1 across their CSVs
+        splits one amplitude into two nearly-equal bins and quietly halves
+        the counts per cell rather than failing.
+        """
+        S = pytest.importorskip(
+            "make_slope_robustness_csv", reason="scripts/ not importable"
+        )
+        M = pytest.importorskip("make_multiband_csv", reason="scripts/ not importable")
+        shared = 0.24
+        assert shared in S.PERIOD_A1_FLUX[3.75] and shared in M.SIGNAL_A1_FLUX
+        from_slope = S.parse_period_a1(S.PERIOD_A1_DEFAULT)[3.75][
+            S.PERIOD_A1_FLUX[3.75].index(shared)
+        ]
+        from_mb = M.SIGNAL_A1[M.SIGNAL_A1_FLUX.index(shared)]
+        assert from_slope == from_mb  # exact equality, not approx
+
+    def test_flux_amplitude_to_mag_is_the_single_rounding_rule(self):
+        from pioran_periodicity.simulate import (
+            FRACTIONAL_FLUX_TO_MAG,
+            flux_amplitude_to_mag,
+        )
+
+        got = flux_amplitude_to_mag(0.24)
+        assert got == 0.26058
+        assert got == pytest.approx(0.24 * FRACTIONAL_FLUX_TO_MAG, rel=1e-4)
+        # idempotent to the rounding, and stable across repeated calls
+        assert flux_amplitude_to_mag(0.24) == got
+
     def test_fixed_defaults_are_in_magnitudes(self):
         from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG
 

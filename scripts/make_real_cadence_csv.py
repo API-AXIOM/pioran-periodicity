@@ -44,7 +44,11 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG, MAGNITUDE_UNITS
+from pioran_periodicity.simulate import (
+    FRACTIONAL_FLUX_TO_MAG,
+    MAGNITUDE_UNITS,
+    flux_amplitude_to_mag,
+)
 
 # Steepest value is -3.5, NOT -4.0. The fitted slope is alpha_high =
 # -highalpha and the prior is alpha_high ~ U(alpha_low, 4.0), so a truth of
@@ -69,7 +73,7 @@ PERIOD_A1_FLUX = {
     7.5: [0.1125, 0.53, 0.75],
 }
 PERIOD_A1_DEFAULT = [
-    f"{period}:" + ",".join(f"{a1 * FRACTIONAL_FLUX_TO_MAG:.5g}" for a1 in a1_list)
+    f"{period}:" + ",".join(str(flux_amplitude_to_mag(a1)) for a1 in a1_list)
     for period, a1_list in PERIOD_A1_FLUX.items()
 ]
 
@@ -226,6 +230,7 @@ def main():
     ap.add_argument(
         "--period-a1", action="append", default=None,
         help='signal variant only, repeatable: "PERIOD:A1_1,A1_2,..." '
+        "with the period in YEARS and the amplitudes in MAGNITUDES "
         f"(default: {PERIOD_A1_DEFAULT})",
     )
     ap.add_argument(
@@ -249,7 +254,16 @@ def main():
         "--multiband-ready CSV; omit for a merged single-band CSV",
     )
     for col, default in FIXED_DEFAULTS.items():
-        ap.add_argument(f"--{col}", type=type(default), default=default)
+        ap.add_argument(
+            f"--{col}", type=type(default), default=default,
+            # `rms` is in MAGNITUDES; a flux-era --rms 0.15 would still be
+            # stamped units="mag" and pass run_sim.py's guard while injecting
+            # 8% less variability. See make_slope_robustness_csv.FIXED_HELP.
+            help=(
+                "process rms, in MAGNITUDES (flux-era 0.15 -> %(default).4f mag)"
+                if col == "rms" else "(default: %(default)s)"
+            ),
+        )
     args = ap.parse_args()
 
     # Fail loud: the library must actually have this survey before spending

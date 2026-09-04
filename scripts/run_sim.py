@@ -243,7 +243,7 @@ def band_amp_beta(row):
 
     ``band_amp_beta`` is an optional CSV column: per-band variability
     amplitudes are ``a_b = (lambda_b / lambda_ref) ** (-beta)``, so beta = 0
-    means every band sees identical flux -- exactly what the simulator did
+    means every band varies identically -- exactly what the simulator did
     before multi-band support. A CSV that omits the column, or leaves it
     blank, is simulated the old way and its cached light curves stay
     byte-identical (no ``band`` array saved, global-median centring).

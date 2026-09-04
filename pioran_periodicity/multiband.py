@@ -53,7 +53,7 @@ def power_law_band_amplitudes(
     ``a_b = (lambda_b / lambda_ref) ** (-beta)``, normalised so the reference
     band has ``a_ref = 1`` exactly (the convention pinned by
     :class:`BandEncoding` and ``models.build_family``). ``beta = 0`` gives
-    ``a_b = 1`` for every band, i.e. the identical-flux-in-every-band
+    ``a_b = 1`` for every band, i.e. the identical-variability-in-every-band
     behaviour the simulator had before colour dependence existed; ``beta > 0``
     makes bluer (shorter-wavelength) bands more variable, the direction real
     quasar structure functions show.
