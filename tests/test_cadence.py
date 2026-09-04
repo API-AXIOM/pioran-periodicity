@@ -83,9 +83,9 @@ def test_fit_magerr_relation_too_few_points():
 
 
 def test_noise_model_floors_negative_predictions():
-    # A steep fit extrapolated far outside the training range can dip
+    # A legacy poly fit extrapolated far outside its training range can dip
     # negative; __call__ must floor it, never return <= 0.
-    nm = NoiseModel({"g": np.array([1.0, 0.0])})  # magerr = mag
+    nm = NoiseModel({"g": np.array([1.0, 0.0])}, kind="poly_magerr")
     out = nm("g", np.array([-5.0, 0.0, 5.0]))
     assert np.all(out > 0)
     assert out[-1] == pytest.approx(5.0)
@@ -95,6 +95,67 @@ def test_noise_model_unknown_band_raises():
     nm = NoiseModel({"g": np.array([0.0, 0.05])})
     with pytest.raises(KeyError):
         nm("r", np.array([19.0]))
+
+
+def test_noise_model_default_is_log_space():
+    """Default coefficients are fitted to log10(magerr), so evaluation must
+    exponentiate: magerr = 10**poly(mag)."""
+    nm = NoiseModel({"g": np.array([0.25, -6.0])})
+    assert nm.kind == "log10_linear"
+    assert nm("g", np.array([20.0]))[0] == pytest.approx(10 ** (0.25 * 20.0 - 6.0))
+
+
+def test_noise_model_log_linear_is_monotonic_and_positive():
+    """The reason for the log-space fit: the old degree-2 fit to magerr turned
+    over near 16.6 mag, so a brighter epoch got a LARGER error. That inverted
+    the brightness-error correlation inside a light curve once the relation
+    started being evaluated per epoch."""
+    nm = NoiseModel({"g": np.array([0.256, -6.034])})
+    mags = np.linspace(13.0, 24.0, 200)
+    out = nm("g", mags)
+    assert np.all(out > 0)
+    assert np.all(np.diff(out) > 0)
+
+    # the legacy quadratic really is non-monotonic over the same range
+    legacy = NoiseModel(
+        {"g": np.array([0.00654, -0.2189, 1.878])}, kind="poly_magerr"
+    )
+    assert not np.all(np.diff(legacy("g", mags)) > 0)
+
+
+def test_noise_model_roundtrip_carries_kind():
+    nm = NoiseModel({"g": np.array([0.25, -6.0])})
+    back = NoiseModel.from_dict(nm.to_dict())
+    assert back.kind == "log10_linear"
+    assert back("g", np.array([19.5])) == pytest.approx(nm("g", np.array([19.5])))
+
+
+def test_noise_model_legacy_cache_without_kind_is_read_as_poly():
+    """A cache written before the log-space fit must still evaluate the way it
+    was written, not be silently reinterpreted as log-space."""
+    legacy = {"g": [0.0, 0.05]}
+    nm = NoiseModel.from_dict(legacy)
+    assert nm.kind == "poly_magerr"
+    assert nm("g", np.array([19.0]))[0] == pytest.approx(0.05)
+
+
+def test_noise_model_rejects_unknown_kind():
+    with pytest.raises(ValueError, match="unknown NoiseModel kind"):
+        NoiseModel({"g": np.array([0.25, -6.0])}, kind="nonsense")
+
+
+def test_fit_magerr_relation_fits_in_log_space():
+    mag = np.linspace(16.0, 21.0, 200)
+    truth = 10 ** (0.27 * mag - 6.3)
+    coeffs = fit_magerr_relation(mag, truth)
+    assert coeffs[0] == pytest.approx(0.27, rel=1e-6)
+    nm = NoiseModel({"g": coeffs})
+    assert np.allclose(nm("g", mag), truth, rtol=1e-6)
+
+
+def test_fit_magerr_relation_rejects_nonpositive_magerr():
+    with pytest.raises(ValueError, match="strictly positive"):
+        fit_magerr_relation(np.array([18.0, 19.0]), np.array([0.01, 0.0]))
 
 
 def test_from_survey_dirs_skips_unmatched(library):

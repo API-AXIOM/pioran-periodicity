@@ -691,6 +691,90 @@ class TestNoisePrescriptions:
         assert out["g"] == pytest.approx(20.2)
 
 
+class TestPeriodPriorProvenance:
+    """The campaigns use a DIFFERENT period prior per cadence (each pool's
+    shortest baseline: ZTF 6.0, LSST WFD 9.0, synthetic 9.5 yr). A stored
+    result must say which one produced it -- Bayes factors are only comparable
+    across runs sharing a prior, and MB3.1 was exactly this failure going
+    unrecorded."""
+
+    def test_sine_variants_record_the_period_prior(self):
+        cfg = PriorConfig(period=(0.2, 6.0))
+        fam = build_family("drw", cfg, variants=("plain", "sine"))
+        sine = [v for k, v in fam.members.items() if "sine" in k][0]
+        rec = sine.meta["period_prior"]
+        assert rec["low"] == pytest.approx(0.2)
+        assert rec["high"] == pytest.approx(6.0)
+        assert rec["shape"] == "LogUniform"
+        assert rec["unit"] == "yr"
+
+    def test_the_recorded_bound_tracks_the_config(self):
+        """Not a hardcoded constant -- it must follow --period-max."""
+        for hi in (6.0, 9.0, 9.5):
+            fam = build_family(
+                "drw", PriorConfig(period=(0.2, hi)), variants=("sine",)
+            )
+            spec = next(iter(fam.members.values()))
+            assert spec.meta["period_prior"]["high"] == pytest.approx(hi)
+
+    def test_plain_variants_record_none(self):
+        fam = build_family("drw", PriorConfig(), variants=("plain",))
+        spec = next(iter(fam.members.values()))
+        assert spec.meta["period_prior"] is None
+
+
+class TestOBPLComponentSelection:
+    """Defect: the component count was chosen by checking the PSD
+    approximation error at a hard-coded alpha_high=2.5 while the sampler
+    explores the prior to 4.0. Actively violated for ZTF sampling: 1.18% at
+    2.5 but 8.55% at 4.0, against a 5% budget."""
+
+    def test_components_are_chosen_at_the_top_of_the_prior(self):
+        import importlib.util
+        import pathlib
+
+        from pioran_periodicity.kernels import psd_approximation_error
+
+        spec = importlib.util.spec_from_file_location(
+            "run_sim",
+            pathlib.Path(__file__).resolve().parents[1] / "scripts" / "run_sim.py",
+        )
+        run_sim = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run_sim)
+
+        rng = np.random.default_rng(0)
+        t = np.sort(rng.uniform(0.0, 7.4, 1055))  # ZTF-like: the failing case
+        band, n, err = run_sim.obpl_components(t)
+
+        # whatever n it picks must satisfy the budget at the PRIOR's worst
+        # case, not merely at some mid-range slope
+        alpha_max = PriorConfig().alpha_high_max
+        worst = psd_approximation_error(0.5, 0.0, alpha_max, band, n_components=n)
+        assert worst["max_rel_error"] <= run_sim.OBPL_MAX_REL_ERROR
+
+        # and the old behaviour really was insufficient here
+        at_20 = psd_approximation_error(0.5, 0.0, alpha_max, band, n_components=20)
+        assert at_20["max_rel_error"] > run_sim.OBPL_MAX_REL_ERROR
+        assert n > 20
+
+    def test_explicit_alpha_high_max_is_honoured(self):
+        import importlib.util
+        import pathlib
+
+        spec = importlib.util.spec_from_file_location(
+            "run_sim2",
+            pathlib.Path(__file__).resolve().parents[1] / "scripts" / "run_sim.py",
+        )
+        run_sim = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(run_sim)
+
+        rng = np.random.default_rng(0)
+        t = np.sort(rng.uniform(0.0, 7.4, 1055))
+        _, n_shallow, _ = run_sim.obpl_components(t, alpha_high_max=2.5)
+        _, n_steep, _ = run_sim.obpl_components(t, alpha_high_max=4.0)
+        assert n_steep >= n_shallow
+
+
 class TestOBPLSharpness:
     """MB3.5: the simulated PSD must be in the same family as the fitted one.
     Pioran's SingleBendingPowerLaw has no sharpness parameter (it is 1)."""

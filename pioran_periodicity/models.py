@@ -251,6 +251,23 @@ def _uses_relative_sine_amplitude(cfg: PriorConfig, noise: str) -> bool:
     return cfg.sine_amplitude_fraction is not None and noise != "carma"
 
 
+def _period_prior_label(cfg: PriorConfig, variant: str):
+    """The sine period prior, recorded so a stored result can never be
+    ambiguous about which prior produced it.
+
+    Bayes factors are only comparable across runs that share a prior, and the
+    campaigns deliberately use a DIFFERENT upper bound per cadence (each
+    pool's shortest baseline: ZTF 6.0, LSST WFD 9.0, synthetic 9.5 yr). Without
+    this, results from different campaigns are indistinguishable on disk --
+    the same failure mode as defect MB3.1, where nulls silently ran a
+    (0.2, 4.0) prior while signals ran (0.2, 8.0).
+    """
+    if "sine" not in variant:
+        return None
+    lo, hi = cfg.period
+    return {"low": float(lo), "high": float(hi), "shape": "LogUniform", "unit": "yr"}
+
+
 def _sine_amplitude_prior_label(cfg: PriorConfig, noise: str, variant: str):
     if "sine" not in variant:
         return None
@@ -589,6 +606,7 @@ def build_family(
                 "sine_amplitude_prior": _sine_amplitude_prior_label(
                     cfg, noise, variant
                 ),
+                "period_prior": _period_prior_label(cfg, variant),
                 "fit_sine_colour": bool(
                     sine_wl_ratios is not None and "sine" in variant
                 ),

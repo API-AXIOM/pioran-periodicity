@@ -52,6 +52,62 @@ LSST. Nothing on disk can be reused.
   deliberate — the uncertainty is a property of the measurement, and a
   genuinely brighter source is genuinely better measured.
 
+### Changed (continued)
+- **The ZTF `magerr(mag)` relation is now fitted in log space.**
+  `fit_magerr_relation` fits `log10(magerr) = poly(mag)` (default degree 1),
+  so the relation is positive and monotonic by construction. The previous
+  degree-2 fit to `magerr` itself turned over at 16.5–16.7 mag: below the
+  vertex a *brighter* source was assigned a *larger* error. Harmless while the
+  relation was evaluated once per object; sign-inverting once it is evaluated
+  per epoch, where it sets the direction of the brightness–error correlation
+  within a light curve. Affected 6 of 243 per-band zero points in the ZTF pool.
+  Accuracy is unchanged (median |log10| residual 0.0415 vs 0.0417 in g, 0.0396
+  vs 0.0388 in r, 0.0429 vs 0.0401 in i). `NoiseModel` gained a `kind` field
+  (`"log10_linear"` default, `"poly_magerr"` legacy); caches written without
+  one are read as legacy, so old files still evaluate as written.
+- **The sine period prior is now recorded in result metadata**
+  (`period_prior`: low/high/shape/unit, on sine variants). The campaigns
+  deliberately use a different upper bound per cadence — each pool's shortest
+  baseline, ZTF 6.0 / LSST WFD 9.0 / synthetic 9.5 yr — and Bayes factors are
+  only comparable across runs sharing a prior. Without this, results from
+  different campaigns are indistinguishable on disk: the same failure mode as
+  MB3.1, where nulls silently ran (0.2, 4.0) while signals ran (0.2, 8.0).
+- **`obpl_components` now sizes the basis at the top of the `alpha_high`
+  prior**, not at a hard-coded 2.5. This was actively violated, not untidy: at
+  n=20 the PSD approximation error on a typical ZTF sampling (1055 points over
+  7.4 yr) is 1.18% at alpha=2.5 but **8.55% at alpha=4.0**, against a 5%
+  budget — so at steep slopes, the cells that matter most scientifically, the
+  fitted model was not the model we thought. Expect some light curves to move
+  to n=30 (0.63%), which costs more per likelihood call.
+
+### References
+- Ivezić et al. (2019) — the LSST single-visit photometric error model
+  (`sigma_sys`, `gamma`, the `x` parameterisation).
+- Rubin Data Preview 1, arxiv.org/pdf/2603.23786, and
+  dp1.lsst.io/processing/calibration/photometric.html — DP1 is ComCam
+  commissioning data; E. Charles et al. (2025) report its u and y errors
+  underestimated and depths overestimated.
+- EDP2 (released 2026-07-27), dp2.lsst.io — first LSSTCam-based preview, but
+  coadds and catalogs only; per-visit and difference images arrive Oct–Dec
+  2026, so it cannot yet validate a single-visit error model.
+- Validation data: 78,714 real LSSTCam alert-stream detections, 60 AGN,
+  2025-12-15 to 2026-06-14, via the public ALeRCE broker
+  (science.alerce.online); held locally at
+  `summaries/real_lsst_alert_photometry.csv`.
+- photerr, github.com/jfcrenshaw/photerr (Crenshaw & Yan; Crenshaw et al.
+  2024, AJ 168, 80) — generalises Ivezić 2019 to low SNR and extended
+  sources. **Considered and declined**: an extra runtime dependency for long
+  campaigns, and the plain high-SNR form already matches real LSSTCam
+  point-source photometry to 12–18%. Its exact conversion
+  `sigma = 2.5 log10(1 + NSR)` is ~8% larger than the Ivezić approximation
+  and did fit our data slightly better at nominal depths (0.0857 vs 0.0981
+  dex); Ivezić retained as the accepted community standard.
+- The log-linear `magerr(mag)` form is standard empirically, e.g.
+  `log10(sigma) = 0.3416 m - 7.7095`; our ZTF slopes are 0.256 (g), 0.275 (r),
+  0.272 (i). Clamping a non-monotonic fit at its vertex (equivalent to
+  repeating the brightest magnitude bin, the other published approach) would
+  leave a kink where the log-linear form has none.
+
 ### Removed
 - `cadence.depth_to_fractional_error`, superseded by
   `cadence.lsst_magnitude_error` (which returns MAGNITUDES, matching the ZTF

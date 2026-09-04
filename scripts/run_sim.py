@@ -349,13 +349,39 @@ def simulate_or_load(
     return t, y, yerr, band
 
 
-def obpl_components(t):
+def obpl_components(t, alpha_high_max=None):
     """Pick an OBPL component count that keeps the PSD approximation error
-    below OBPL_MAX_REL_ERROR for this light curve's band."""
+    below OBPL_MAX_REL_ERROR for this light curve's band.
+
+    The error is checked at the WORST CASE the sampler can reach -- the top of
+    the ``alpha_high`` prior -- not at a fixed mid-range slope. It previously
+    tested a hard-coded ``alpha_high=2.5`` while the prior runs to 4.0, and
+    that was actively violated, not merely untidy: at n=20 the error on a
+    typical ZTF sampling (1055 points over 7.4 yr) is 1.18% at alpha=2.5 but
+    **8.55% at alpha=4.0**, against a 5% budget. The steep-slope cells are
+    exactly the scientifically interesting ones, so the model being fitted
+    there was not the model we thought. Measured at n=20 across samplings:
+
+    ==========================  =======  =======
+    sampling                    a=2.5    a=4.0
+    ==========================  =======  =======
+    LSST WFD 690 pts / 9.9 yr     1.04%    4.20%
+    ZTF     1055 pts / 7.4 yr     1.18%    8.55%
+    sparse   200 pts / 9.9 yr     0.45%    1.27%
+    synthetic 300 pts / 9.5 yr    0.47%    3.49%
+    ==========================  =======  =======
+
+    Expect some light curves to need n=30 (0.63% at alpha=4.0), which costs
+    more per likelihood call.
+    """
+    if alpha_high_max is None:
+        alpha_high_max = pp.PriorConfig().alpha_high_max
     band = FrequencyBand.from_times(t)
     n = OBPL_N_COMPONENTS
     while n <= 60:
-        err = psd_approximation_error(0.5, 0.0, 2.5, band, n_components=n)
+        err = psd_approximation_error(
+            0.5, 0.0, float(alpha_high_max), band, n_components=n
+        )
         if err["max_rel_error"] <= OBPL_MAX_REL_ERROR:
             return band, n, err
         n += 10

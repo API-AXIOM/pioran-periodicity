@@ -27,12 +27,35 @@ CADENCE_COLUMNS = ["mjd", "band", "mag", "magerr", "depth", "seeing"]
 _MAGERR_FLOOR = 1e-4  # a fitted magerr(mag) polynomial must not predict <= 0
 
 
-def fit_magerr_relation(mag: np.ndarray, magerr: np.ndarray, degree: int = 2) -> np.ndarray:
-    """Fit an empirical magerr(mag) polynomial from real photometry.
+def fit_magerr_relation(
+    mag: np.ndarray, magerr: np.ndarray, degree: int = 1
+) -> np.ndarray:
+    """Fit an empirical magerr(mag) relation from real photometry, in LOG space.
+
+    Fits ``log10(magerr) = poly(mag)``, so the recovered relation is positive
+    and (for the default ``degree=1``) MONOTONIC by construction.
+
+    This replaces a degree-2 fit to ``magerr`` itself. That parabola turned
+    over at 16.5-16.7 mag, so below the vertex a BRIGHTER source was assigned
+    a LARGER error -- harmless while the relation was evaluated once per
+    object at a fixed magnitude, but sign-inverting once it is evaluated per
+    epoch, where it sets the direction of the brightness-error correlation
+    inside a single light curve. It affected 6 of 243 per-band zero points in
+    the ZTF pool (2 of 100 objects, faintest-case zero point 14.76 mag).
+
+    The log-linear form is not a compromise: fitted to the same real ZTF
+    photometry it matches the quadratic's accuracy (median |log10| residual
+    0.0415 vs 0.0417 in g, 0.0396 vs 0.0388 in r, 0.0429 vs 0.0401 in i) while
+    being monotonic everywhere. It is also the standard empirical form in the
+    literature, e.g. ``log10(sigma) = 0.3416 m - 7.7095``; our ZTF slopes come
+    out at 0.256 (g), 0.275 (r), 0.272 (i). Clamping the quadratic at its
+    vertex -- the other published approach, equivalent to repeating the
+    brightest magnitude bin -- would leave a kink where this has none.
 
     ``mag``, ``magerr`` must already be cleaned by the caller (finite,
     magerr > 0) -- this function does not filter. Returns ``np.polyfit``
-    coefficients, highest power first.
+    coefficients IN LOG SPACE, highest power first; pair them with
+    ``NoiseModel(kind="log10_linear")``.
     """
     mag = np.asarray(mag, dtype=float)
     magerr = np.asarray(magerr, dtype=float)
@@ -45,7 +68,9 @@ def fit_magerr_relation(mag: np.ndarray, magerr: np.ndarray, degree: int = 2) ->
             f"need at least {degree + 1} points to fit a degree-{degree} "
             f"polynomial, got {len(mag)}"
         )
-    return np.polyfit(mag, magerr, degree)
+    if np.any(magerr <= 0):
+        raise ValueError("magerr must be strictly positive to fit in log space")
+    return np.polyfit(mag, np.log10(magerr), degree)
 
 
 # LSST single-visit photometric error model, Ivezic et al. (2019):
@@ -102,22 +127,52 @@ def lsst_magnitude_error(
 
 @dataclass
 class NoiseModel:
-    """Per-band magerr(mag) polynomial fit, one per survey."""
+    """Per-band magerr(mag) fit, one per survey.
+
+    ``kind`` selects how ``coeffs`` are interpreted:
+
+    * ``"log10_linear"`` (default, current): ``magerr = 10**poly(mag)`` --
+      positive and monotonic by construction. See ``fit_magerr_relation``.
+    * ``"poly_magerr"`` (legacy): ``magerr = poly(mag)`` directly, the old
+      degree-2 fit that turned over at ~16.6 mag. Retained ONLY so previously
+      cached noise models still evaluate as they did when they were written;
+      caches without a ``kind`` field are assumed to be this.
+    """
 
     coeffs: dict[str, np.ndarray]
+    kind: str = "log10_linear"
+
+    def __post_init__(self):
+        if self.kind not in ("log10_linear", "poly_magerr"):
+            raise ValueError(
+                f"unknown NoiseModel kind {self.kind!r}; expected "
+                "'log10_linear' or 'poly_magerr'"
+            )
 
     def __call__(self, band: str, mag: np.ndarray) -> np.ndarray:
         if band not in self.coeffs:
             raise KeyError(f"no noise-model fit for band {band!r}; have {sorted(self.coeffs)}")
         pred = np.polyval(self.coeffs[band], mag)
+        if self.kind == "log10_linear":
+            pred = 10.0**pred
         return np.clip(pred, _MAGERR_FLOOR, None)
 
     def to_dict(self) -> dict:
-        return {band: c.tolist() for band, c in self.coeffs.items()}
+        return {
+            "kind": self.kind,
+            "coeffs": {band: c.tolist() for band, c in self.coeffs.items()},
+        }
 
     @classmethod
     def from_dict(cls, d: dict) -> "NoiseModel":
-        return cls({band: np.asarray(c) for band, c in d.items()})
+        if "coeffs" in d and "kind" in d:
+            return cls(
+                {band: np.asarray(c) for band, c in d["coeffs"].items()},
+                kind=str(d["kind"]),
+            )
+        # legacy cache: a bare {band: coeffs} mapping, written before the
+        # log-space fit existed. Interpret it the way it was written.
+        return cls({band: np.asarray(c) for band, c in d.items()}, kind="poly_magerr")
 
 
 @dataclass
