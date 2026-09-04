@@ -810,13 +810,17 @@ class TestSampleRealCadence:
 
         rng = np.random.default_rng(12)
         mjd = np.sort(rng.uniform(60000.0, 60060.0, 15))
-        cadence = _make_cadence(mjd, np.full(15, "r"), depth=np.full(15, 24.0))
+        # noise switched off: the per-epoch uncertainty now tracks source
+        # brightness, so an injected signal legitimately changes the noise
+        # realisation too and equal seeds no longer isolate the signal.
+        cadence = _make_cadence(mjd, np.full(15, "r"), depth=None)
+        zero = lambda b, m: np.zeros(len(np.atleast_1d(m)))  # noqa: E731
 
         _, flux0, _ = sample_real_cadence(
-            sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=6
+            sim_lc, cadence, noise_model=zero, ref_mag=19.0, seed=6
         )
         _, flux1, _ = sample_real_cadence(
-            sim_lc, cadence, noise_model=None, ref_mag=19.0, seed=6,
+            sim_lc, cadence, noise_model=zero, ref_mag=19.0, seed=6,
             mean_signal=lambda tt: 5.0,
         )
         assert np.mean(flux1) - np.mean(flux0) == pytest.approx(5.0, abs=1e-9)
@@ -844,23 +848,67 @@ class TestSampleRealCadence:
             assert np.array_equal(xa, xb)
 
 
-class TestDepthToFractionalError:
-    def test_snr_five_at_depth(self):
-        from pioran_periodicity.cadence import depth_to_fractional_error
+class TestLSSTMagnitudeError:
+    """Ivezic et al. (2019) single-visit photometric error model."""
 
-        assert depth_to_fractional_error(23.0, 23.0) == pytest.approx(0.2)
+    def test_five_sigma_at_the_depth(self):
+        from pioran_periodicity.cadence import lsst_magnitude_error
+
+        # at m == m5 the source is a 5-sigma detection: sigma ~ 0.2 mag
+        assert lsst_magnitude_error(23.0, 23.0, band="r") == pytest.approx(
+            0.2, abs=0.01
+        )
 
     def test_grows_fainter_than_depth(self):
-        from pioran_periodicity.cadence import depth_to_fractional_error
+        from pioran_periodicity.cadence import lsst_magnitude_error
 
-        faint = depth_to_fractional_error(24.0, 23.0)
-        bright = depth_to_fractional_error(22.0, 23.0)
-        assert faint > 0.2 > bright
+        faint = lsst_magnitude_error(24.0, 23.0, band="r")
+        bright = lsst_magnitude_error(22.0, 23.0, band="r")
+        assert faint > bright
 
+    def test_systematic_floor_is_enforced(self):
+        """The old 0.2*x model went to zero for bright sources; 25.6% of real
+        campaign visits fell below LSST's own 5 mmag floor as a result."""
+        from pioran_periodicity.cadence import LSST_SIGMA_SYS, lsst_magnitude_error
 
-# ===========================================================================
-# data
-# ===========================================================================
+        very_bright = lsst_magnitude_error(14.0, 24.0, band="r")
+        assert very_bright == pytest.approx(LSST_SIGMA_SYS, rel=0.01)
+        assert very_bright >= LSST_SIGMA_SYS
+        # the old approximation had no floor at all
+        assert 0.2 * 10 ** (0.4 * (14.0 - 24.0)) < LSST_SIGMA_SYS / 10
+
+    def test_u_band_uses_its_own_gamma(self):
+        from pioran_periodicity.cadence import LSST_GAMMA, lsst_magnitude_error
+
+        assert LSST_GAMMA["u"] == pytest.approx(0.038)
+        # gamma cancels exactly at m == m5 (x = 1 makes the two terms sum to
+        # 0.04 for any gamma), so compare away from the limiting magnitude
+        u = lsst_magnitude_error(21.0, 23.0, band="u")
+        r = lsst_magnitude_error(21.0, 23.0, band="r")
+        assert u != pytest.approx(r, rel=1e-6)
+        assert u > r  # smaller gamma => larger linear term at x < 1
+
+    def test_unknown_band_falls_back_to_default_gamma(self):
+        from pioran_periodicity.cadence import (
+            LSST_GAMMA_DEFAULT,
+            lsst_magnitude_error,
+        )
+
+        assert lsst_magnitude_error(21.0, 23.0, band="g") == pytest.approx(
+            lsst_magnitude_error(21.0, 23.0, gamma=LSST_GAMMA_DEFAULT)
+        )
+
+    def test_bright_end_exceeds_the_old_linear_approximation(self):
+        """The old model was 1.6x low 4 mag above the depth, 2.9x at 5, 6.3x
+        at 6 -- the regime most LSST AGN sit in."""
+        from pioran_periodicity.cadence import lsst_magnitude_error
+
+        MAG2FRAC = 0.4 * np.log(10.0)
+        for dm, expected in ((4.0, 1.58), (5.0, 2.87), (6.0, 6.29)):
+            m5 = 24.0
+            new = lsst_magnitude_error(m5 - dm, m5, band="r")
+            old = 0.2 * 10 ** (0.4 * (m5 - dm - m5)) / MAG2FRAC
+            assert new / old == pytest.approx(expected, rel=0.02)
 
 
 class TestData:

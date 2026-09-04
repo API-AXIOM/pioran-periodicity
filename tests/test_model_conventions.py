@@ -226,6 +226,21 @@ def _multiband_cadence(n_per_band=40, bands=("g", "r", "i"), seed=5):
     )
 
 
+def _zero_noise(band, mag):
+    """A noise model that returns exactly zero, for tests that need the
+    noise-free flux (the uncertainty now tracks source brightness, so two
+    runs with the same seed no longer share a noise realisation)."""
+    return np.zeros(len(np.atleast_1d(mag)))
+
+
+def _noiseless_cadence(cad):
+    """Copy of a cadence with ``depth`` removed, routing it to ``noise_model``
+    (so ``_zero_noise`` applies) instead of the LSST depth prescription."""
+    out = cad.copy()
+    out["depth"] = np.nan
+    return out
+
+
 def _flat_lc(lc):
     """Same time grid, constant unit flux -- isolates the noise prescription
     from the source's own variability."""
@@ -262,16 +277,22 @@ def sim_lc():
 
 class TestSimulatorInjectionConvention:
     """The other half of MB1: what the SIMULATOR injects must be what the
-    likelihood fits. Tested by differencing two runs with identical seeds,
-    which isolates the injected signal exactly."""
+    likelihood fits. Tested by differencing two runs with identical seeds.
+
+    The noise is switched OFF (``depth`` NaN plus a zero-returning
+    ``noise_model``) so the difference is exactly the injected signal. Equal
+    seeds alone no longer suffice: the per-epoch uncertainty now depends on
+    the source's brightness, so injecting a signal legitimately changes the
+    noise realisation as well.
+    """
 
     def test_injected_signal_is_scaled_by_the_band_amplitude(self, sim_lc):
         from pioran_periodicity.simulate import sample_real_cadence
 
-        cad = _multiband_cadence()
+        cad = _noiseless_cadence(_multiband_cadence())
         amps = {"g": 1.3, "r": 1.0, "i": 0.7}
         kw = dict(
-            noise_model=None,
+            noise_model=_zero_noise,
             ref_mag=19.0,
             seed=17,
             band_amp=amps,
@@ -291,8 +312,8 @@ class TestSimulatorInjectionConvention:
     def test_injected_signal_is_unscaled_without_band_amp(self, sim_lc):
         from pioran_periodicity.simulate import sample_real_cadence
 
-        cad = _multiband_cadence()
-        kw = dict(noise_model=None, ref_mag=19.0, seed=17)
+        cad = _noiseless_cadence(_multiband_cadence())
+        kw = dict(noise_model=_zero_noise, ref_mag=19.0, seed=17)
         t0, f0, _ = sample_real_cadence(sim_lc, cad, **kw)
         t1, f1, _ = sample_real_cadence(sim_lc, cad, mean_signal=_sine, **kw)
         assert np.allclose(f1 - f0, _sine(t0), atol=1e-12)

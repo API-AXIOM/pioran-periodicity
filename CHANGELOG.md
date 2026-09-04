@@ -4,6 +4,65 @@ All notable changes to `pioran_periodicity`. Analysis-level decisions (prior
 choices, leakage acceptance, per-run scope) are recorded separately in
 `comparison_reports/changes_and_decisions.md`.
 
+## [Unreleased]
+
+Breaking for simulation: **every simulated light curve changes**, both ZTF and
+LSST. Nothing on disk can be reused.
+
+### Changed
+- **ZTF simulated uncertainties are now heteroscedastic and per-band.** The
+  `magerr(mag)` polynomial was evaluated once per object at the fixed r-band
+  catalogue magnitude, giving one constant sigma per band. Measured against
+  the real photometry already in the cadence library (594,716 epochs, 443
+  objects) that was wrong three ways: no epoch-to-epoch variation (real
+  within-object magerr spans p90/p10 ~ 1.31, and within-object
+  `corr(mag, magerr)` has median 0.998 — the error is very nearly a
+  deterministic function of source brightness); the r-band magnitude was fed
+  to the g and i polynomials, making g errors 23% too small; and evaluating a
+  convex `magerr(mag)` at a single mean magnitude biases it low by Jensen's
+  inequality. Net, sigma was 0.85x the object's real median magerr and fell
+  outside that object's own real p10–p90 range 68% of the time. The
+  polynomial is now evaluated per epoch at that epoch's noise-free simulated
+  magnitude, with a per-band zero point from the cadence library's real
+  photometry.
+- **The LSST error model is now Ivezić et al. (2019)**, replacing a
+  `0.2 * 10**(0.4*(mag - depth))` approximation that used the 5-sigma
+  definition alone — linear in x, no `gamma x^2` term, no systematic floor,
+  no band dependence. The old form was accurate near the limiting magnitude
+  but 1.6x low 4 mag above the depth, 2.9x at 5 and 6.3x at 6, and it left
+  **25.6% of real campaign visits with an uncertainty below LSST's own 5 mmag
+  systematic floor** — a precision Rubin will never deliver. Now 0.00%.
+  Validated against 78,714 real LSSTCam alert detections (60 AGN,
+  2025-12-15 to 2026-06-14 — LSSTCam, not ComCam): with m5 fitted per band the
+  new form matches real magnitude errors to 0.047–0.074 dex in all six bands,
+  against 0.052–0.163 dex for the old one. Fitted depths ran 0.0–0.46 mag
+  shallower than nominal, worst in u and g, consistent with DP1's documented
+  finding that u and y errors are underestimated; **treat u and y results as
+  the least trustworthy**.
+- **Both surveys now share one path.** Each computes a per-epoch apparent
+  magnitude from the noise-free model flux, applies its own survey-appropriate
+  `sigma(mag)`, and converts through the single `MAG_TO_FRACTIONAL_FLUX`
+  factor; `sigma_F` scales by the epoch's own flux. This removes the earlier
+  asymmetry where ZTF noise tracked source brightness and LSST's did not,
+  which would have biased the ZTF-vs-LSST comparison the campaigns exist to
+  make.
+- The magnitude always comes from the **noise-free** model, never the realised
+  noisy flux: a noise draw must not feed back into its own error bar. An
+  injected periodic signal therefore does imprint on the error bars. This is
+  deliberate — the uncertainty is a property of the measurement, and a
+  genuinely brighter source is genuinely better measured.
+
+### Removed
+- `cadence.depth_to_fractional_error`, superseded by
+  `cadence.lsst_magnitude_error` (which returns MAGNITUDES, matching the ZTF
+  `noise_model` convention, with the conversion applied once at the call site).
+
+### Notes
+- `photerr` (github.com/jfcrenshaw/photerr) generalises Ivezić 2019 to the
+  low-SNR regime and extended sources. Not adopted: an extra runtime
+  dependency for long campaigns, and the plain high-SNR form already matches
+  real LSSTCam point-source photometry to 12–18%.
+
 ## [0.3.0] — 2026-09-03
 
 Breaking. Adds one sampled parameter to **every** model.

@@ -21,7 +21,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pioran_periodicity.cadence import depth_to_fractional_error
+from pioran_periodicity.cadence import lsst_magnitude_error
 
 __all__ = [
     "simulate_lightcurve",
@@ -255,12 +255,13 @@ def sample_real_cadence(
     SAME quantity -- a fractional flux error -- and then scaled by the
     realised light curve's own mean flux level:
 
-    * **LSST/OpSim** (finite ``depth``): the visit's ``fiveSigmaDepth`` via
-      :func:`pioran_periodicity.cadence.depth_to_fractional_error`,
-      ``sigma_F/F = 0.2 * 10**(0.4*(ref_mag - depth))``. Already a fractional
-      flux error. Genuinely heteroscedastic: depth varies epoch to epoch with
-      observing conditions (21.0-25.2 across the library), so every visit
-      gets its own uncertainty.
+    * **LSST/OpSim** (finite ``depth``): the Ivezic et al. (2019) single-visit
+      model via :func:`pioran_periodicity.cadence.lsst_magnitude_error`,
+      evaluated at the visit's ``fiveSigmaDepth`` and the epoch's own
+      noise-free simulated magnitude. Doubly heteroscedastic: depth varies
+      epoch to epoch with observing conditions (21.0-25.2 across the library)
+      AND the source's brightness varies. Includes the 0.005 mag systematic
+      floor, which the previous approximation lacked entirely.
     * **ZTF** (no depth): the survey's ``magerr(mag)`` polynomial, fitted to
       real ZTF photometry, evaluated at each epoch's own NOISE-FREE SIMULATED
       magnitude. Returns a MAGNITUDE error, converted here with
@@ -294,12 +295,6 @@ def sample_real_cadence(
     meaningful. Neither feeds the realised variability back into the
     uncertainty.
 
-    ASYMMETRY, deliberate and open: the LSST branch still evaluates the
-    source term at the fixed ``ref_mag``. It is heteroscedastic through
-    ``depth``, but its brightness term does not track the simulated source
-    the way ZTF's now does. Making LSST per-epoch too is the same argument
-    and is a pending decision, not an oversight -- until it is taken, the
-    LSST branch is bit-for-bit what it was.
 
     ``band_amp`` / ``band_mu`` ({band: value} dicts, default None) inject
     colour-dependent variability: ``y_b(t) = mu_b + a_b * x(t) + noise_b(t)``,
@@ -387,40 +382,35 @@ def sample_real_cadence(
     # mean level is already carried by the per-band zero point below.
     clean = latent if signal is None else latent + signal
 
-    frac_err = np.empty(len(idx), dtype=float)
+    # Per-epoch apparent magnitude of the noise-free model. Both surveys now
+    # go through this same quantity; only the sigma(mag) prescription differs.
+    band_ref = _band_reference_magnitudes(band, mag_real, ref_mag)
+    ratio = np.clip(clean / ref_flux, _FLUX_RATIO_FLOOR, None)
+    epoch_mag = np.array([band_ref[b] for b in band], dtype=float) - 2.5 * np.log10(
+        ratio
+    )
+
+    mag_err = np.empty(len(idx), dtype=float)
     has_depth = np.isfinite(depth)
     if has_depth.any():
-        # LSST: the brightness term is still the fixed ref_mag -- see the
-        # ASYMMETRY note in the docstring. Unchanged, deliberately.
-        frac_err[has_depth] = depth_to_fractional_error(ref_mag, depth[has_depth])
+        for b in np.unique(band[has_depth]):
+            sel = has_depth & (band == b)
+            mag_err[sel] = lsst_magnitude_error(epoch_mag[sel], depth[sel], band=b)
     if (~has_depth).any():
         if noise_model is None:
             raise ValueError(
                 "cadence has rows without a real `depth` (non-LSST epochs) "
                 "but no noise_model was given"
             )
-        band_ref = _band_reference_magnitudes(band, mag_real, ref_mag)
-        # brightness relative to the mean level, as a magnitude offset
-        ratio = np.clip(clean / ref_flux, _FLUX_RATIO_FLOOR, None)
-        delta_mag = -2.5 * np.log10(ratio)
         for b in np.unique(band[~has_depth]):
             sel = (~has_depth) & (band == b)
-            # noise_model returns a MAGNITUDE error; convert to the
-            # fractional flux error the depth branch already produces
-            frac_err[sel] = MAG_TO_FRACTIONAL_FLUX * noise_model(
-                b, band_ref[b] + delta_mag[sel]
-            )
+            mag_err[sel] = noise_model(b, epoch_mag[sel])
 
-    # sigma_F = (sigma_F/F) * F. The LSST branch keeps the historical mean-flux
-    # normalisation so its light curves are bit-for-bit unchanged; the ZTF
-    # branch scales by the epoch's own flux, which is what a *fractional* error
-    # means once the fraction itself varies epoch to epoch.
-    flux_err = frac_err * ref_flux
-    if (~has_depth).any():
-        sel = ~has_depth
-        flux_err[sel] = frac_err[sel] * np.clip(
-            clean[sel], _FLUX_RATIO_FLOOR * ref_flux, None
-        )
+    # Both prescriptions now return a MAGNITUDE error; one conversion, one
+    # normalisation. sigma_F = (sigma_F/F) * F with F the epoch's own
+    # noise-free flux -- what a *fractional* error means once it varies.
+    frac_err = MAG_TO_FRACTIONAL_FLUX * mag_err
+    flux_err = frac_err * np.clip(clean, _FLUX_RATIO_FLOOR * ref_flux, None)
 
     flux = latent + rng.normal(0.0, flux_err)
     if signal is not None:
