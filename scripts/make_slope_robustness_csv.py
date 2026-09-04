@@ -48,6 +48,8 @@ import argparse
 import numpy as np
 import pandas as pd
 
+from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG, MAGNITUDE_UNITS
+
 # Steepest value is -3.5, NOT -4.0. The fitted OBPL slope is
 # alpha_high = -highalpha, and the prior is alpha_high ~ U(alpha_low, 4.0);
 # a truth of exactly 4.0 sits ON that boundary (17% of those fits piled above
@@ -60,7 +62,7 @@ import pandas as pd
 HIGHALPHA_DEFAULT = "-2.0,-2.3,-2.6,-2.9,-3.2,-3.5"
 
 # Period-specific (low, at-limit ~50% detect, comfortably-above ~90%+ detect)
-# amplitude triads for the fixed cadence below (NumofWINDOW=20, rms=0.15).
+# amplitude triads for the fixed cadence below (NumofWINDOW=20).
 # period=1.25: calibrated directly (a 6-point, n=20/cell DRW-only batch at
 #   highalpha=-3.0 found 0% up to A1=0.075, 35% at 0.095, 45% at 0.1125;
 #   0.12 interpolates the ~50% point, 0.24 matches the saturating point of
@@ -69,10 +71,22 @@ HIGHALPHA_DEFAULT = "-2.0,-2.3,-2.6,-2.9,-3.2,-3.5"
 #   own (period, A1) grid at highalpha=-3.0 (real grid points where
 #   available; the period=7.5 at-limit point, 0.53, interpolates between
 #   that grid's 0.495@38% and 0.6225@86%).
+#
+# Those calibrations were all measured when the simulator generated
+# fractional FLUX, so they are recorded here in FLUX and converted once,
+# below, to the magnitudes the simulator now emits. Converting (rather than
+# reading the flux numbers as magnitudes) is what keeps the physical
+# amplitude -- and so the measured detection powers -- attached to each
+# triad; the dimensionless f = A1/rms the sine prior uses is invariant under
+# it, since `rms` is scaled by the same factor.
+PERIOD_A1_FLUX = {
+    1.25: [0.015, 0.12, 0.24],
+    3.75: [0.1125, 0.24, 0.3675],
+    7.5: [0.1125, 0.53, 0.75],
+}
 PERIOD_A1_DEFAULT = [
-    "1.25:0.015,0.12,0.24",
-    "3.75:0.1125,0.24,0.3675",
-    "7.5:0.1125,0.53,0.75",
+    f"{period}:" + ",".join(f"{a1 * FRACTIONAL_FLUX_TO_MAG:.5g}" for a1 in a1_list)
+    for period, a1_list in PERIOD_A1_FLUX.items()
 ]
 
 FIXED_DEFAULTS = dict(
@@ -85,8 +99,11 @@ FIXED_DEFAULTS = dict(
     # frequency, which sits inside the science band. Injection and inference now
     # use the same PSD family (defect MB3.5).
     sharpness=1.0,
-    rms=0.15,
-    noiseSIGMA=0.015,
+    # MAGNITUDES (the simulator's unit since 2026-09-04), converted from the
+    # fractional-flux 0.15 / 0.015 the campaigns were calibrated at so the
+    # physical amplitude is unchanged: 0.1629 mag and 0.0163 mag.
+    rms=0.15 * FRACTIONAL_FLUX_TO_MAG,
+    noiseSIGMA=0.015 * FRACTIONAL_FLUX_TO_MAG,
     NightsperWINDOW=15,
     OBSperiod=6,
     WINDOWwidth=60,
@@ -96,6 +113,9 @@ FIXED_DEFAULTS = dict(
 
 CSV_COLUMNS = [
     "ID",
+    # Marks rms/noiseSIGMA/A1 as magnitudes; run_sim.py refuses a CSV
+    # without it, so a flux-era config cannot be run by mistake.
+    "units",
     "simSEED",
     "sampleSEED",
     "rms",
@@ -229,7 +249,7 @@ def main():
         args.seed,
         fixed,
     )
-    df = pd.DataFrame(rows)[CSV_COLUMNS]
+    df = pd.DataFrame(rows).assign(units=MAGNITUDE_UNITS)[CSV_COLUMNS]
     df.to_csv(args.out, index=False)
 
     n_cells = len(highalpha) * (

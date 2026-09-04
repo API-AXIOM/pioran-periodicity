@@ -242,12 +242,13 @@ def _noiseless_cadence(cad):
 
 
 def _flat_lc(lc):
-    """Same time grid, constant unit flux -- isolates the noise prescription
-    from the source's own variability."""
+    """Same time grid, constant magnitude -- isolates the noise prescription
+    from the source's own variability. Zero, not one: the series is a
+    magnitude DEVIATION about the mean level, so "no variability" is 0."""
     from pioran_periodicity.simulate import SimulatedLightCurve
 
     return SimulatedLightCurve(
-        time=lc.time, flux=np.ones_like(lc.flux), dt_days=lc.dt_days
+        time=lc.time, mag=np.zeros_like(lc.mag), dt_days=lc.dt_days
     )
 
 
@@ -269,8 +270,8 @@ def sim_lc():
             (2.0,),
             n_samples=40000,
             dt_minutes=60.0,
-            mean=1.0,
-            rms=0.15,
+            mean_mag=0.0,
+            sigma_mag=0.15,
             seed=1,
         )
 
@@ -448,6 +449,134 @@ class TestSineParameterNaming:
         assert run_sim.true_mean_signal(pd.Series({"highalpha": -2.0})) is None
 
 
+class TestMagnitudeUnitsGuards:
+    """The simulator generated fractional FLUX until 2026-09-04 and now
+    generates MAGNITUDES. The two differ by only 2.5/ln10 = 1.0857, so a
+    stale config CSV or a stale cached light curve would run to completion
+    and silently inject 8% less variability than its calibration assumed.
+    Both entry points must refuse un-marked inputs rather than reinterpret
+    them.
+    """
+
+    def _run_sim(self):
+        return pytest.importorskip("run_sim", reason="scripts/ not importable")
+
+    def test_config_csv_without_units_is_refused(self):
+        run_sim = self._run_sim()
+        stale = pd.DataFrame({"ID": [0, 1], "rms": [0.15, 0.15]})
+        with pytest.raises(ValueError, match="no `units` column"):
+            run_sim.require_magnitude_units(stale, "stale.csv")
+
+    def test_config_csv_with_wrong_units_is_refused(self):
+        run_sim = self._run_sim()
+        wrong = pd.DataFrame({"ID": [0, 1], "units": ["flux", "flux"]})
+        with pytest.raises(ValueError, match="units must be"):
+            run_sim.require_magnitude_units(wrong, "wrong.csv")
+        # a partially-migrated CSV is just as dangerous as a fully stale one
+        mixed = pd.DataFrame({"ID": [0, 1], "units": ["mag", "flux"]})
+        with pytest.raises(ValueError, match="units must be"):
+            run_sim.require_magnitude_units(mixed, "mixed.csv")
+
+    def test_config_csv_in_magnitudes_is_accepted(self):
+        run_sim = self._run_sim()
+        good = pd.DataFrame({"ID": [0, 1], "units": ["mag", "mag"]})
+        run_sim.require_magnitude_units(good, "good.csv")  # must not raise
+
+    def test_generated_csvs_carry_the_units_marker(self):
+        """The generators and the guard must agree, or every campaign CSV
+        would be rejected at launch."""
+        from pioran_periodicity.simulate import MAGNITUDE_UNITS
+
+        for mod_name in (
+            "make_slope_robustness_csv",
+            "make_real_cadence_csv",
+            "make_multiband_csv",
+        ):
+            mod = pytest.importorskip(mod_name, reason="scripts/ not importable")
+            assert "units" in mod.CSV_COLUMNS, mod_name
+        assert MAGNITUDE_UNITS == "mag"
+
+    def test_flux_era_cached_lightcurve_is_refused(self, tmp_path):
+        """A cache written before the change is indistinguishable from a
+        valid one by shape or scale, so the `units` field is the only thing
+        that can tell them apart."""
+        run_sim = self._run_sim()
+        np.savez(
+            tmp_path / "7.npz",
+            t=np.linspace(0, 1, 5),
+            y=np.zeros(5),
+            yerr=np.full(5, 0.01),
+        )  # no `units` -> flux era
+        with pytest.raises(ValueError, match="simulated in fractional flux"):
+            run_sim.simulate_or_load(pd.Series({"ID": 7}), str(tmp_path))
+
+    def test_magnitude_cached_lightcurve_is_reused(self, tmp_path):
+        run_sim = self._run_sim()
+        from pioran_periodicity.simulate import MAGNITUDE_UNITS
+
+        t = np.linspace(0.0, 1.0, 5)
+        np.savez(
+            tmp_path / "7.npz",
+            t=t,
+            y=np.arange(5.0),
+            yerr=np.full(5, 0.01),
+            units=MAGNITUDE_UNITS,
+        )
+        out_t, out_y, out_e, band = run_sim.simulate_or_load(
+            pd.Series({"ID": 7}), str(tmp_path)
+        )
+        assert np.allclose(out_t, t)
+        assert np.allclose(out_y, np.arange(5.0))
+        assert band is None
+
+
+class TestAmplitudeUnitConversion:
+    """The flux->magnitude move must PRESERVE the physical amplitude, so the
+    empirically calibrated A1 triads keep the detection powers they were
+    measured at. Reading the flux-era 0.15 as "0.15 mag" instead would
+    shrink every injected signal by 8%.
+    """
+
+    def test_calibrated_triads_are_converted_not_reinterpreted(self):
+        from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG
+
+        mod = pytest.importorskip(
+            "make_slope_robustness_csv", reason="scripts/ not importable"
+        )
+        parsed = mod.parse_period_a1(mod.PERIOD_A1_DEFAULT)
+        assert set(parsed) == set(mod.PERIOD_A1_FLUX)
+        for period, flux_a1 in mod.PERIOD_A1_FLUX.items():
+            for got, want in zip(parsed[period], flux_a1):
+                assert got == pytest.approx(want * FRACTIONAL_FLUX_TO_MAG, rel=1e-4)
+                assert got > want  # a magnitude amplitude is the LARGER number
+
+    def test_dimensionless_amplitude_ratio_is_invariant(self):
+        """f = A1/rms is what the hierarchical sine prior is written in.
+        Numerator and denominator are scaled by the same factor, so every
+        triad's f must be bit-identical to its flux-era value -- this is why
+        the conversion cannot change any detection power.
+        """
+        mod = pytest.importorskip(
+            "make_slope_robustness_csv", reason="scripts/ not importable"
+        )
+        rms_mag = mod.FIXED_DEFAULTS["rms"]
+        parsed = mod.parse_period_a1(mod.PERIOD_A1_DEFAULT)
+        for period, flux_a1 in mod.PERIOD_A1_FLUX.items():
+            for got, want in zip(parsed[period], flux_a1):
+                assert got / rms_mag == pytest.approx(want / 0.15, rel=1e-4)
+
+    def test_fixed_defaults_are_in_magnitudes(self):
+        from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG
+
+        mod = pytest.importorskip(
+            "make_slope_robustness_csv", reason="scripts/ not importable"
+        )
+        assert mod.FIXED_DEFAULTS["rms"] == pytest.approx(0.15 * FRACTIONAL_FLUX_TO_MAG)
+        assert mod.FIXED_DEFAULTS["noiseSIGMA"] == pytest.approx(
+            0.015 * FRACTIONAL_FLUX_TO_MAG
+        )
+
+
 class TestPeriodPriorIsCampaignWide:
     """MB3.1 / MB3.4: one sine period prior for every campaign, NaN-safe.
 
@@ -558,18 +687,28 @@ class TestNoisePrescriptions:
     """MB3.3: the two surveys use different, survey-appropriate noise models
     that must nonetheless be expressed in the same units."""
 
-    def test_conversion_constant(self):
-        from pioran_periodicity.simulate import MAG_TO_FRACTIONAL_FLUX
+    def test_conversion_constants(self):
+        from pioran_periodicity.simulate import (
+            FRACTIONAL_FLUX_TO_MAG,
+            MAG_TO_FRACTIONAL_FLUX,
+        )
 
         assert MAG_TO_FRACTIONAL_FLUX == pytest.approx(0.4 * np.log(10.0))
         assert MAG_TO_FRACTIONAL_FLUX == pytest.approx(0.921, abs=1e-3)
+        # 2.5/ln 10, the factor campaign inputs were scaled by when the
+        # simulator moved from fractional flux to magnitudes
+        assert FRACTIONAL_FLUX_TO_MAG == pytest.approx(2.5 / np.log(10.0))
+        assert FRACTIONAL_FLUX_TO_MAG == pytest.approx(1.0857, abs=1e-4)
+        assert FRACTIONAL_FLUX_TO_MAG * MAG_TO_FRACTIONAL_FLUX == pytest.approx(1.0)
 
-    def test_magnitude_errors_are_converted_to_fractional_flux(self, sim_lc):
-        """ZTF branch: noise_model returns magnitudes, so the reported flux
-        error must carry the 0.4 ln10 factor.
+    def test_magnitude_errors_are_reported_unconverted(self, sim_lc):
+        """The light curve is in magnitudes and ``noise_model`` returns a
+        magnitude error, so the reported uncertainty IS that error: no
+        0.4 ln10 factor, and no rescaling by the epoch's brightness.
 
-        Uses a FLAT light curve so the per-epoch brightness scaling is a
-        no-op and the unit conversion can be asserted exactly.
+        This is the mirror image of the old MB3.3 assertion, which required
+        the conversion INTO fractional flux. Applying it now would inflate
+        every ZTF sigma by 1/0.921.
         """
         from pioran_periodicity.simulate import (
             MAG_TO_FRACTIONAL_FLUX,
@@ -580,16 +719,31 @@ class TestNoisePrescriptions:
         cad = _multiband_cadence(n_per_band=20, bands=("g", "r"), seed=9)
         cad["depth"] = np.nan  # no depth -> ZTF-style branch
         magerr = 0.05
-        _, _, flux_err = sample_real_cadence(
+        _, _, mag_err = sample_real_cadence(
             flat,
             cad,
             noise_model=lambda b, m: np.full(len(m), magerr),
             ref_mag=19.0,
             seed=13,
         )
-        assert np.allclose(flux_err, MAG_TO_FRACTIONAL_FLUX * magerr * 1.0)
-        # and is NOT the unconverted magnitude error (the MB3.3 regression)
-        assert not np.allclose(flux_err, magerr * 1.0)
+        assert np.allclose(mag_err, magerr)
+        assert not np.allclose(mag_err, MAG_TO_FRACTIONAL_FLUX * magerr)
+
+    def test_lsst_errors_are_reported_unconverted(self, sim_lc):
+        """Same contract on the depth-driven branch: what
+        ``lsst_magnitude_error`` returns is what comes back."""
+        from pioran_periodicity.cadence import lsst_magnitude_error
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        flat = _flat_lc(sim_lc)
+        cad = _multiband_cadence(n_per_band=20, bands=("r",), seed=9)
+        cad["depth"] = 24.0
+        _, _, mag_err = sample_real_cadence(
+            flat, cad, noise_model=None, ref_mag=19.0, seed=13
+        )
+        # flat light curve -> every epoch sits at the band zero point, 19.0
+        expected = lsst_magnitude_error(np.array([19.0]), np.array([24.0]), band="r")
+        assert np.allclose(mag_err, expected[0])
 
     def test_both_branches_are_heteroscedastic(self, sim_lc):
         """LSST noise varies per epoch with visit depth; ZTF noise now varies
@@ -619,27 +773,27 @@ class TestNoisePrescriptions:
         assert ztf_err.std() > 0
 
     def test_ztf_error_is_set_by_brightness_not_by_the_noise_draw(self, sim_lc):
-        """The uncertainty must come from the NOISE-FREE model flux.
+        """The uncertainty must come from the NOISE-FREE model magnitude.
 
         With a flat light curve and a constant noise model the error is exactly
-        constant even though the returned flux is noisy. Had sigma been derived
-        from the realised (noisy) flux, it would scatter -- a noise draw
-        feeding back into its own error bar.
+        constant even though the returned magnitude is noisy. Had sigma been
+        derived from the realised (noisy) magnitude, it would scatter -- a
+        noise draw feeding back into its own error bar.
         """
         from pioran_periodicity.simulate import sample_real_cadence
 
         flat = _flat_lc(sim_lc)
         cad = _multiband_cadence(n_per_band=30, bands=("g",), seed=9)
         cad["depth"] = np.nan
-        _, flux, flux_err = sample_real_cadence(
+        _, mag, mag_err = sample_real_cadence(
             flat,
             cad,
             noise_model=lambda b, m: 0.01 * m,
             ref_mag=19.0,
             seed=13,
         )
-        assert flux.std() > 0  # the flux really is noisy
-        assert flux_err.std() == pytest.approx(0.0, abs=1e-15)
+        assert mag.std() > 0  # the magnitudes really are noisy
+        assert mag_err.std() == pytest.approx(0.0, abs=1e-15)
 
     def test_ztf_error_tracks_source_brightness(self, sim_lc):
         """A brighter epoch gets a smaller magnitude error, because magerr(mag)
@@ -649,17 +803,17 @@ class TestNoisePrescriptions:
         cad = _multiband_cadence(n_per_band=60, bands=("g",), seed=9)
         cad["depth"] = np.nan
         # noise_model increasing in magnitude => fainter epochs noisier
-        _, _, flux_err = sample_real_cadence(
+        _, _, mag_err = sample_real_cadence(
             sim_lc,
             cad,
             noise_model=lambda b, m: 0.01 * m,
             ref_mag=19.0,
             seed=13,
         )
-        assert flux_err.std() > 0
+        assert mag_err.std() > 0
         # sigma_mag decreases with brightness, so the brightest epoch must
         # carry a strictly smaller error than the faintest one.
-        assert flux_err.min() < flux_err.max()
+        assert mag_err.min() < mag_err.max()
 
     def test_per_band_reference_magnitude_comes_from_real_photometry(self, sim_lc):
         """``ref_mag`` is the r-band catalogue magnitude; each band must use

@@ -530,8 +530,8 @@ def sim_lc():
             (2.0,),
             n_samples=40000,
             dt_minutes=60.0,
-            mean=1.0,
-            rms=0.15,
+            mean_mag=0.0,
+            sigma_mag=0.15,
             seed=1,
         )
 
@@ -591,8 +591,8 @@ class TestColourDependentInjection:
     """sample_real_cadence(band_amp=...) -- the Phase 5 simulator hook."""
 
     def test_no_band_amp_is_bit_for_bit_unchanged(self, sim_lc):
-        """The default path must be identical to before the parameter existed
-        (existing cached campaign light curves must stay reproducible)."""
+        """Omitting band_amp/band_mu must be identical to passing None, so the
+        colour hook costs nothing when it is not used."""
         from pioran_periodicity.simulate import sample_real_cadence
 
         cad = _multiband_cadence()
@@ -604,7 +604,7 @@ class TestColourDependentInjection:
         for xa, xb in zip(a, b):
             assert np.array_equal(xa, xb)
 
-    def test_unit_band_amp_leaves_flux_essentially_unchanged(self, sim_lc):
+    def test_unit_band_amp_leaves_mag_essentially_unchanged(self, sim_lc):
         from pioran_periodicity.simulate import sample_real_cadence
 
         cad = _multiband_cadence()
@@ -630,7 +630,7 @@ class TestColourDependentInjection:
 
     def test_amplitude_scales_variability_not_the_mean(self, sim_lc):
         """a_b multiplies the scatter about the mean level; the mean level
-        itself (and hence the flux zero point) must not move."""
+        itself (and hence the magnitude zero point) must not move."""
         from pioran_periodicity.simulate import sample_real_cadence
 
         cad = _multiband_cadence(n_per_band=120, bands=("g", "r"), seed=6)

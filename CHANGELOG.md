@@ -10,6 +10,50 @@ Breaking for simulation: **every simulated light curve changes**, both ZTF and
 LSST. Nothing on disk can be reused.
 
 ### Changed
+- **The simulator now generates MAGNITUDES, not fractional flux.** The
+  real-data path (`data.load_photometry_csv`,
+  `multiband.cadence_to_multiband_series`, `run_realdata.py`) has always fit
+  magnitudes directly; the simulator generated fractional flux and converted
+  the surveys' magnitude errors into it. That made the one quantity the
+  pipeline actually fits differ between the simulated and real branches for
+  no benefit — the GP likelihood is unit-agnostic — and it is the last of the
+  2026-09-03 audit's open items.
+
+  It also *removes* code rather than adding it: both survey noise
+  prescriptions already computed a per-epoch magnitude error internally, so
+  the `MAG_TO_FRACTIONAL_FLUX` conversion, the rescaling of sigma by the
+  epoch's own flux, and the non-positive-flux floor guarding the logarithm
+  all disappear. Photometric noise is now Gaussian in magnitudes, which is
+  what a quoted `magerr` means and what the likelihood assumes; before it was
+  Gaussian in flux and therefore skewed in the fitted variable.
+
+  Specifics:
+  - `SimulatedLightCurve.flux` is now `.mag`; `simulate_lightcurve`'s `mean`
+    / `rms` (a flux level and a *fractional* rms) are now `mean_mag` /
+    `sigma_mag` (a magnitude level and an *absolute* magnitude std).
+    `sample_seasonal_pattern` and `sample_real_cadence` return
+    `(t, mag, mag_err)`.
+  - **Amplitudes are converted, not reinterpreted.** The two conventions
+    differ by only `2.5/ln 10 = 1.0857` (new `FRACTIONAL_FLUX_TO_MAG`), so
+    campaign inputs calibrated in flux (`rms` 0.15 -> 0.1629 mag,
+    `noiseSIGMA` 0.015 -> 0.0163 mag, and every empirically calibrated `A1`
+    triad) are scaled by it, preserving the physical amplitude and hence the
+    detection powers those triads were measured at. Reading a flux-era 0.15
+    as "0.15 mag" would silently have shrunk the injected variability by 8%.
+    The dimensionless `f = A1/sigma` the hierarchical sine prior is written
+    in is invariant under the change, since numerator and denominator scale
+    together.
+  - `log10_variance` is now a prior on mag^2; the campaigns' truth
+    (sigma = 0.163 mag, log10 var = -1.58) stays interior to the existing
+    (-4, 1) bounds, so they are unchanged.
+  - The keyword rename is deliberate: a caller still passing `mean=`/`rms=`
+    raises `TypeError` rather than quietly simulating the wrong amplitude.
+    For the same reason, config CSVs must now carry a `units` column equal to
+    `"mag"` (the `make_*_csv.py` generators emit it) and cached light-curve
+    `.npz` files carry a matching `units` field -- `run_sim.py` refuses
+    inputs without them instead of reinterpreting flux-era values. Flux-era
+    caches cannot be rescaled after the fact, because their per-epoch
+    uncertainties were derived in flux.
 - **ZTF simulated uncertainties are now heteroscedastic and per-band.** The
   `magerr(mag)` polynomial was evaluated once per object at the fixed r-band
   catalogue magnitude, giving one constant sigma per band. Measured against

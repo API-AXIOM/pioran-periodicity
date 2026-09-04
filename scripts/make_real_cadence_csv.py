@@ -44,6 +44,8 @@ import argparse
 import numpy as np
 import pandas as pd
 
+from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG, MAGNITUDE_UNITS
+
 # Steepest value is -3.5, NOT -4.0. The fitted slope is alpha_high =
 # -highalpha and the prior is alpha_high ~ U(alpha_low, 4.0), so a truth of
 # 4.0 sits ON the boundary (17% of those fits piled above 3.9; the cell
@@ -55,14 +57,20 @@ import pandas as pd
 HIGHALPHA_DEFAULT = "-2.0,-2.3,-2.6,-2.9,-3.2,-3.5"
 
 # Same triads as make_slope_robustness_csv.py's PERIOD_A1_DEFAULT -- see that
-# file's docstring for provenance. Reused here (not recalibrated for real
-# cadences) so detection-power comparisons are apples to apples: any
+# file's docstring for provenance, including why they are recorded in
+# fractional FLUX (the unit they were calibrated in) and converted once to
+# the magnitudes the simulator now emits. Reused here (not recalibrated for
+# real cadences) so detection-power comparisons are apples to apples: any
 # difference between this campaign and signal_case.csv is attributable to
 # the cadence, not to a different amplitude grid.
+PERIOD_A1_FLUX = {
+    1.25: [0.015, 0.12, 0.24],
+    3.75: [0.1125, 0.24, 0.3675],
+    7.5: [0.1125, 0.53, 0.75],
+}
 PERIOD_A1_DEFAULT = [
-    "1.25:0.015,0.12,0.24",
-    "3.75:0.1125,0.24,0.3675",
-    "7.5:0.1125,0.53,0.75",
+    f"{period}:" + ",".join(f"{a1 * FRACTIONAL_FLUX_TO_MAG:.5g}" for a1 in a1_list)
+    for period, a1_list in PERIOD_A1_FLUX.items()
 ]
 
 FIXED_DEFAULTS = dict(
@@ -75,12 +83,17 @@ FIXED_DEFAULTS = dict(
     # bend frequency, which sits inside the science band. Injection and
     # inference now share one PSD family (defect MB3.5).
     sharpness=1.0,
-    rms=0.15,
+    # MAGNITUDES (the simulator's unit since 2026-09-04), converted from the
+    # fractional-flux 0.15 the campaigns were calibrated at so the physical
+    # amplitude is unchanged: 0.1629 mag.
+    rms=0.15 * FRACTIONAL_FLUX_TO_MAG,
 )
 
 CSV_COLUMNS = [
-    "ID", "simSEED", "sampleSEED", "rms", "bendfreq", "lowalpha", "highalpha",
-    "sharpness", "period", "A1", "cadence_source", "ref_mag",
+    # `units` marks rms/A1 as magnitudes; run_sim.py refuses a CSV without
+    # it, so a flux-era config cannot be run by mistake.
+    "ID", "units", "simSEED", "sampleSEED", "rms", "bendfreq", "lowalpha",
+    "highalpha", "sharpness", "period", "A1", "cadence_source", "ref_mag",
 ]
 
 # Optional multi-band colour column: run_sim.py's band_amp_beta(row) reads
@@ -271,7 +284,7 @@ def main():
         band_amp_beta=args.band_amp_beta,
     )
     columns = CSV_COLUMNS_MULTIBAND if args.band_amp_beta is not None else CSV_COLUMNS
-    df = pd.DataFrame(rows)[columns]
+    df = pd.DataFrame(rows).assign(units=MAGNITUDE_UNITS)[columns]
     df.to_csv(args.out, index=False)
 
     n_cells = len(highalpha) * (

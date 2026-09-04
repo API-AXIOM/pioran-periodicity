@@ -28,7 +28,7 @@ from pioran_periodicity import (PriorConfig, FrequencyBand, build_family,
                                 fit_family, log10_bayes_factors,
                                 SamplerSettings)
 
-t, y, yerr = ...  # time (years), flux, uncertainties
+t, y, yerr = ...  # time (years), magnitudes, uncertainties (mag)
 
 cfg = PriorConfig(log10_variance=(-4, 1), log10_fbend=(-3, 2),
                   sine_amplitude_scale=0.3, period=(0.1, 8.0))

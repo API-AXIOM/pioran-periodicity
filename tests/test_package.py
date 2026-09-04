@@ -636,8 +636,8 @@ def sim_lc():
             (2.0,),
             n_samples=40000,
             dt_minutes=60.0,
-            mean=1.0,
-            rms=0.15,
+            mean_mag=0.0,
+            sigma_mag=0.15,
             seed=1,
         )
 
@@ -654,11 +654,22 @@ _PAT = dict(
 
 
 class TestSimulate:
-    def test_lightcurve_length_dt_and_rms(self, sim_lc):
+    def test_lightcurve_length_dt_and_sigma(self, sim_lc):
         assert len(sim_lc.time) == 40000
         assert sim_lc.dt_days == pytest.approx(60.0 / (60.0 * 24.0))
-        frac_rms = np.std(sim_lc.flux) / np.mean(sim_lc.flux)
-        assert frac_rms == pytest.approx(0.15, rel=0.2)
+        # sigma_mag is an ABSOLUTE magnitude std, not a fractional rms
+        assert np.std(sim_lc.mag) == pytest.approx(0.15, rel=0.2)
+        assert np.mean(sim_lc.mag) == pytest.approx(0.0, abs=1e-9)
+
+    def test_mean_mag_shifts_the_level_only(self):
+        """mean_mag sets the level; sigma_mag the spread. Independently."""
+        from pioran_periodicity.simulate import simulate_lightcurve
+
+        kw = dict(n_samples=4096, dt_minutes=60.0, sigma_mag=0.2, seed=7)
+        base = simulate_lightcurve(_powerlaw_psd, (2.0,), mean_mag=0.0, **kw)
+        shifted = simulate_lightcurve(_powerlaw_psd, (2.0,), mean_mag=18.5, **kw)
+        assert np.allclose(shifted.mag - base.mag, 18.5)
+        assert np.std(base.mag) == pytest.approx(0.2, rel=0.2)
 
     def test_distinct_night_spacing_floor(self, sim_lc):
         # S2: obs_per_night=1, night_window_hours=8 -> spacing >= 16 h.
@@ -705,14 +716,14 @@ class TestSimulate:
         assert len(t_lost) < len(t_full)
         assert len(t_lost) == len(t_full) - int(len(t_full) * 0.5)
 
-    def test_mean_signal_shifts_flux(self, sim_lc):
+    def test_mean_signal_shifts_mag(self, sim_lc):
         from pioran_periodicity.simulate import sample_seasonal_pattern
 
-        _, flux0, _ = sample_seasonal_pattern(sim_lc, seed=4, **_PAT)
-        _, flux1, _ = sample_seasonal_pattern(
+        _, mag0, _ = sample_seasonal_pattern(sim_lc, seed=4, **_PAT)
+        _, mag1, _ = sample_seasonal_pattern(
             sim_lc, seed=4, mean_signal=lambda tt: 5.0, **_PAT
         )
-        assert np.mean(flux1) - np.mean(flux0) == pytest.approx(5.0, abs=1e-9)
+        assert np.mean(mag1) - np.mean(mag0) == pytest.approx(5.0, abs=1e-9)
 
     def test_same_seed_identical_output(self, sim_lc):
         from pioran_periodicity.simulate import sample_seasonal_pattern
@@ -805,7 +816,7 @@ class TestSampleRealCadence:
         )
         assert np.all(yerr_faint > yerr_bright)
 
-    def test_mean_signal_shifts_flux(self, sim_lc):
+    def test_mean_signal_shifts_mag(self, sim_lc):
         from pioran_periodicity.simulate import sample_real_cadence
 
         rng = np.random.default_rng(12)

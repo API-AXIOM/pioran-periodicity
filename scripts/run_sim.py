@@ -72,6 +72,8 @@ from pioran_periodicity.multiband import BandEncoding, power_law_band_amplitudes
 from pioran_periodicity.simulate import (
     sample_real_cadence,
     sample_seasonal_pattern,
+    FRACTIONAL_FLUX_TO_MAG,
+    MAGNITUDE_UNITS,
     simulate_lightcurve,
 )
 
@@ -105,20 +107,53 @@ PERIOD_PRIOR = (0.2, 8.0)
 
 def make_cfg(period_max: float = PERIOD_PRIOR[1]) -> pp.PriorConfig:
     return pp.PriorConfig(
+        # mag^2 now that the simulator generates magnitudes (it was flux^2).
+        # The campaigns' truth, sigma = 0.163 mag, is log10 var = -1.58 --
+        # interior to this range, as -1.65 was under the old convention, so
+        # the bounds need no change.
         log10_variance=(-4.0, 1.0),
         log10_fbend=(-3.0, 2.0),
         alpha_low=(0.0, 2.0),
         alpha_high_max=4.0,
         # Relative (hierarchical) sine amplitude: the prior is on
-        # f = A / sigma_process, not on an absolute magnitude, so it is
-        # scale-free across objects. 0.15 is kept only as the CARMA
-        # fallback -- CARMA has no sampled process variance -- and equals
-        # the campaigns' known simulated rms, so f = A1/0.15 there.
+        # f = A / sigma_process, not on an absolute amplitude, so it is
+        # scale-free across objects AND unaffected by the move from flux to
+        # magnitudes. The scale is kept only as the CARMA fallback -- CARMA
+        # has no sampled process variance -- and equals the campaigns' known
+        # simulated rms, so f = A1/scale there. Both numerator and
+        # denominator are now magnitudes, so f is numerically unchanged.
         sine_amplitude_fraction=1.2,
-        sine_amplitude_scale=0.15,
+        sine_amplitude_scale=0.15 * FRACTIONAL_FLUX_TO_MAG,
         period=(PERIOD_PRIOR[0], period_max),
         err_scale=None,
     )
+
+
+def require_magnitude_units(df, path) -> None:
+    """Refuse a config CSV that was not written for the magnitude simulator.
+
+    The simulator generated fractional FLUX until 2026-09-04; ``rms``,
+    ``noiseSIGMA`` and ``A1`` are now MAGNITUDES. The two conventions differ
+    by only 2.5/ln(10) = 1.0857, so a stale CSV would run to completion and
+    silently inject 8% less variability than its calibration assumed -- the
+    kind of error that never announces itself. Requiring an explicit
+    ``units`` column makes that impossible: old CSVs have none and stop here.
+    """
+    if "units" not in df.columns:
+        raise ValueError(
+            f"{path} has no `units` column. Config CSVs written before the "
+            f"simulator moved to magnitudes hold fractional-FLUX `rms`, "
+            f"`noiseSIGMA` and `A1`; multiply them by "
+            f"{FRACTIONAL_FLUX_TO_MAG:.4f} (2.5/ln 10) to preserve the "
+            f"physical amplitude and add units={MAGNITUDE_UNITS!r}, or "
+            f"regenerate the CSV with the current scripts/make_*_csv.py."
+        )
+    found = set(df["units"].astype(str).unique())
+    if found != {MAGNITUDE_UNITS}:
+        raise ValueError(
+            f"{path}: units must be {MAGNITUDE_UNITS!r} in every row, "
+            f"found {sorted(found)}"
+        )
 
 
 def resolve_period_prior(df, period_max):
@@ -184,7 +219,8 @@ def true_mean_signal(row):
     ``period``/``A1`` are optional CSV columns; a CSV that omits them, or
     sets ``A1 == 0``, simulates pure red noise -- this is what makes a
     config a genuine null scenario for FPR calibration. When present, ``A1``
-    IS the true amplitude directly (thesis-text convention "A_sine = A1",
+    IS the true amplitude directly, in MAGNITUDES like the light curve
+    (thesis-text convention "A_sine = A1",
     confirmed in workspace/run_sim.py's SCENARIOS["3.7"] comment in the
     thesis-replication repo -- NOT a fraction of rms; do not reintroduce an
     ``rms *`` scaling here without re-checking that source).
@@ -224,8 +260,8 @@ def band_amp_beta(row):
 def simulate_or_load(
     row, lc_dir, enforce_leakage_margin=True, cadence_lib=None, n_samples_override=None
 ):
-    """Return (t_years, flux, err) for one CSV row, simulating and caching
-    the light curve on first use.
+    """Return (t_years, mag, mag_err) for one CSV row, simulating and caching
+    the light curve on first use. Everything is in MAGNITUDES.
 
     ``row["cadence_source"]`` (format ``<survey>:<object_id>``), if present
     and non-null, samples a REAL survey cadence via ``cadence_lib`` instead
@@ -242,6 +278,20 @@ def simulate_or_load(
     path = os.path.join(lc_dir, f"{lc_id}.npz")
     if os.path.exists(path):
         d = np.load(path)
+        # A cache written before the simulator moved to magnitudes holds
+        # fractional FLUX. It is indistinguishable by shape or magnitude from
+        # a valid one, so refuse it rather than reuse it: the `units` field
+        # is the only thing that tells them apart, and reusing one would put
+        # flux light curves into a magnitude campaign silently.
+        cached_units = str(d["units"]) if "units" in d.files else ""
+        if cached_units != MAGNITUDE_UNITS:
+            raise ValueError(
+                f"{path} was simulated in fractional flux (no "
+                f"units={MAGNITUDE_UNITS!r} marker). Delete the cache "
+                f"directory and re-simulate; flux-era light curves cannot be "
+                f"rescaled into magnitudes after the fact, because their "
+                f"per-epoch uncertainties were derived in flux."
+            )
         # `band` is absent from light curves cached before multi-band support
         band = d["band"] if "band" in d.files else None
         return d["t"], d["y"], d["yerr"], band
@@ -266,8 +316,8 @@ def simulate_or_load(
         psd_params,
         n_samples=n_samples,
         dt_minutes=DT_MINUTES,
-        mean=1.0,
-        rms=float(row["rms"]),
+        mean_mag=0.0,
+        sigma_mag=float(row["rms"]),
         seed=int(row["simSEED"]),
     )
 
@@ -339,6 +389,7 @@ def simulate_or_load(
         sharpness=float(row["sharpness"]),
         rms=float(row["rms"]),
         noiseSIGMA=float(row["noiseSIGMA"]) if "noiseSIGMA" in row.index else np.nan,
+        units=MAGNITUDE_UNITS,
         cadence_source=str(cadence_source) if cadence_source is not None else "",
         simSEED=int(row["simSEED"]),
         sampleSEED=int(row["sampleSEED"]),
@@ -542,6 +593,7 @@ def main():
 
     os.makedirs(args.out_dir, exist_ok=True)
     df = pd.read_csv(args.config_csv)
+    require_magnitude_units(df, args.config_csv)
 
     needs_cadence_lib = "cadence_source" in df.columns and df["cadence_source"].notna().any()
     if needs_cadence_lib and not args.cadence_library:

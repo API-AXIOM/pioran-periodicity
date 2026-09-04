@@ -40,6 +40,8 @@ import sys
 import numpy as np
 import pandas as pd
 
+from pioran_periodicity.simulate import FRACTIONAL_FLUX_TO_MAG, MAGNITUDE_UNITS
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_real_cadence_csv import (  # noqa: E402
     FIXED_DEFAULTS,
@@ -52,13 +54,17 @@ BETAS = (0.0, 0.35, 0.7)
 # prior bound, which is itself the SHO/n=20 basis-accuracy limit (MB3.2).
 NULL_HIGHALPHA = (-2.0, -3.5)
 SIGNAL_HIGHALPHA = (-3.5,)
-SIGNAL_A1 = (0.24, 0.3675, 0.53)
+# Recorded in the fractional FLUX they were calibrated in, converted once to
+# the magnitudes the simulator now emits -- see make_slope_robustness_csv.py.
+SIGNAL_A1_FLUX = (0.24, 0.3675, 0.53)
+SIGNAL_A1 = tuple(a1 * FRACTIONAL_FLUX_TO_MAG for a1 in SIGNAL_A1_FLUX)
 SIGNAL_PERIOD = 3.75  # yr; well inside the prior and the best-mapped axis
 
 CSV_COLUMNS = [
-    "ID", "simSEED", "sampleSEED", "rms", "bendfreq", "lowalpha", "highalpha",
-    "sharpness", "period", "A1", "cadence_source", "ref_mag", "band_amp_beta",
-    "block",
+    # `units` marks rms/A1 as magnitudes; run_sim.py refuses a CSV without it.
+    "ID", "units", "simSEED", "sampleSEED", "rms", "bendfreq", "lowalpha",
+    "highalpha", "sharpness", "period", "A1", "cadence_source", "ref_mag",
+    "band_amp_beta", "block",
 ]
 
 
@@ -128,7 +134,7 @@ def main():
         os.path.expanduser(args.master_csv), args.n_sims, args.seed
     )
     rows = build_rows(objects, args.survey, id_start, args.seed)
-    df = pd.DataFrame(rows)[CSV_COLUMNS]
+    df = pd.DataFrame(rows).assign(units=MAGNITUDE_UNITS)[CSV_COLUMNS]
 
     out_dir = os.path.expanduser(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
