@@ -156,6 +156,29 @@ def require_magnitude_units(df, path) -> None:
         )
 
 
+def require_magnitude_lightcurve(npz, path) -> None:
+    """Refuse a cached light curve that was simulated in fractional flux.
+
+    A flux-era cache is indistinguishable from a valid one by shape or
+    scale, so the ``units`` field is the only thing that tells them apart.
+    Flux-era light curves cannot be rescaled into magnitudes after the fact,
+    because their per-epoch uncertainties were derived in flux.
+
+    Shared by :func:`simulate_or_load` and scripts that read ``lc_dir``
+    directly (``check_multiband_per_band.py``) -- the check is three lines
+    and was got wrong once when copy-pasted, so there is one copy.
+    """
+    cached = str(npz["units"]) if "units" in npz.files else ""
+    if cached != MAGNITUDE_UNITS:
+        raise ValueError(
+            f"{path} was simulated in fractional flux (no "
+            f"units={MAGNITUDE_UNITS!r} marker). Delete the cache directory "
+            f"and re-simulate; flux-era light curves cannot be rescaled into "
+            f"magnitudes after the fact, because their per-epoch "
+            f"uncertainties were derived in flux."
+        )
+
+
 def resolve_period_prior(df, period_max):
     """The sine period prior's upper bound (years) for this scenario CSV.
 
@@ -278,20 +301,7 @@ def simulate_or_load(
     path = os.path.join(lc_dir, f"{lc_id}.npz")
     if os.path.exists(path):
         d = np.load(path)
-        # A cache written before the simulator moved to magnitudes holds
-        # fractional FLUX. It is indistinguishable by shape or magnitude from
-        # a valid one, so refuse it rather than reuse it: the `units` field
-        # is the only thing that tells them apart, and reusing one would put
-        # flux light curves into a magnitude campaign silently.
-        cached_units = str(d["units"]) if "units" in d.files else ""
-        if cached_units != MAGNITUDE_UNITS:
-            raise ValueError(
-                f"{path} was simulated in fractional flux (no "
-                f"units={MAGNITUDE_UNITS!r} marker). Delete the cache "
-                f"directory and re-simulate; flux-era light curves cannot be "
-                f"rescaled into magnitudes after the fact, because their "
-                f"per-epoch uncertainties were derived in flux."
-            )
+        require_magnitude_lightcurve(d, path)
         # `band` is absent from light curves cached before multi-band support
         band = d["band"] if "band" in d.files else None
         return d["t"], d["y"], d["yerr"], band

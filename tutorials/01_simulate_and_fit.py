@@ -13,7 +13,11 @@ import numpy as np
 
 from pioran_periodicity import PriorConfig, SamplerSettings, build_family
 from pioran_periodicity.inference import fit_family, log10_bayes_factors
-from pioran_periodicity.simulate import sample_seasonal_pattern, simulate_lightcurve
+from pioran_periodicity.simulate import (
+    FRACTIONAL_FLUX_TO_MAG,
+    sample_seasonal_pattern,
+    simulate_lightcurve,
+)
 
 
 def bend_pl(f, norm, f_bend, alpha_lo, alpha_hi):
@@ -33,8 +37,9 @@ def main():
         psd_params=[20.0, 0.00274, 0.0, -2.0],
         n_samples=2**21,
         dt_minutes=10.0,
-        mean=1.0,
-        rms=0.15,
+        mean_mag=0.0,
+        # MAGNITUDES: the simulator's unit. 0.15 fractional flux -> 0.163 mag.
+        sigma_mag=0.15 * FRACTIONAL_FLUX_TO_MAG,
         seed=42,
     )
     t, y, yerr = sample_seasonal_pattern(
@@ -44,7 +49,7 @@ def main():
         window_period_months=12.0,
         window_width_days=10.0,
         data_loss_frac=0.1,
-        noise_sigma=0.05,
+        noise_sigma=0.05 * FRACTIONAL_FLUX_TO_MAG,  # mag
         seed=43,
     )
     t = t - t[0]
@@ -56,7 +61,7 @@ def main():
     cfg = PriorConfig(
         log10_variance=(-4.0, 1.0),
         log10_fbend=(-3.0, 2.0),
-        sine_amplitude_scale=0.15,
+        sine_amplitude_scale=0.15 * FRACTIONAL_FLUX_TO_MAG,  # mag
         period=(0.2, 4.0),
         err_scale=None,
     )

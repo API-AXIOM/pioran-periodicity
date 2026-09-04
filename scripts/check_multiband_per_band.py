@@ -52,7 +52,13 @@ from pioran_periodicity.cadence import CadenceLibrary
 from pioran_periodicity.multiband import BandEncoding
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from run_sim import MODEL_FILE_NAMES, fit_seed, make_cfg  # noqa: E402
+from run_sim import (  # noqa: E402
+    MODEL_FILE_NAMES,
+    fit_seed,
+    make_cfg,
+    require_magnitude_lightcurve,
+    require_magnitude_units,
+)
 
 MODELS = ("drw", "drw+sine")
 SETTINGS_BASE = dict(min_num_live_points=400, frac_remain=0.01, max_ncalls=1_000_000)
@@ -125,6 +131,12 @@ def main():
 
     chk = pd.read_csv(os.path.expanduser(args.check_csv))
     cfg_df = pd.read_csv(os.path.expanduser(args.config_csv))
+    # This script reads the campaign's config CSV and cached light curves
+    # directly rather than through simulate_or_load, so it must repeat both
+    # of run_sim.py's unit guards. It fits with make_cfg's magnitude-
+    # calibrated priors, so a flux-era input would produce per-band
+    # diagnostics that are quietly 8% off rather than failing.
+    require_magnitude_units(cfg_df, args.config_csv)
     lib = CadenceLibrary.from_cache(os.path.expanduser(args.cadence_library))
     out_dir = os.path.expanduser(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -143,7 +155,9 @@ def main():
     rows = []
     for lc_id in lc_ids:
         lc_id = int(lc_id)  # pandas gives np.int64; keeps seeds/meta JSON-safe
-        npz = np.load(os.path.join(os.path.expanduser(args.lc_dir), f"{lc_id}.npz"))
+        npz_path = os.path.join(os.path.expanduser(args.lc_dir), f"{lc_id}.npz")
+        npz = np.load(npz_path)
+        require_magnitude_lightcurve(npz, npz_path)
         t, y, yerr = npz["t"], npz["y"], npz["yerr"]
 
         crow = cfg_df.loc[cfg_df["ID"] == lc_id].iloc[0]

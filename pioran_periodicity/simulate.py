@@ -101,11 +101,20 @@ class SimulatedLightCurve:
     """Continuous simulated light curve: time in days, ``mag`` in MAGNITUDES.
 
     ``mag`` is the model magnitude about ``mean_mag`` (0 by default, i.e. a
-    zero-mean magnitude deviation); the per-band zero point is applied later,
-    in :func:`sample_real_cadence`. The attribute is deliberately not called
-    ``flux`` any more: it is a different physical quantity, and a silent
-    reinterpretation of the old name is exactly the failure this rename
-    prevents.
+    zero-mean magnitude DEVIATION, not an apparent magnitude).
+
+    It stays a deviation all the way through: :func:`sample_real_cadence`
+    uses each band's real zero point only to evaluate sigma(mag) at the right
+    point on the survey's noise curve, and does NOT add it to the returned
+    series. That is deliberate -- the fitted model's ``mu0``/``mu_b`` priors
+    are Normal(0, 0.5) and ``run_sim.py`` median-centres anyway, so adding a
+    ~19 mag zero point here would put the truth far outside the prior. A
+    genuine per-band colour offset is injected through ``band_mu``, which is
+    the parameter the model estimates.
+
+    The attribute is deliberately not called ``flux`` any more: it is a
+    different physical quantity, and a silent reinterpretation of the old
+    name is exactly the failure this rename prevents.
     """
 
     time: np.ndarray

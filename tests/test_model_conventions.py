@@ -566,22 +566,46 @@ class TestAmplitudeUnitConversion:
                 assert got / rms_mag == pytest.approx(want / 0.15, rel=1e-4)
 
     def test_generators_agree_bit_for_bit_on_the_same_amplitude(self):
-        """Both campaigns inject A1 = 0.24 (flux-era). If the two generators
-        round differently, an exact groupby/join on A1 across their CSVs
-        splits one amplitude into two nearly-equal bins and quietly halves
-        the counts per cell rather than failing.
+        """All three campaigns inject A1 = 0.24 (flux-era). If they round
+        differently, an exact groupby/join on A1 across their CSVs splits one
+        amplitude into two nearly-equal bins and quietly halves the counts
+        per cell rather than failing.
         """
         S = pytest.importorskip(
             "make_slope_robustness_csv", reason="scripts/ not importable"
         )
+        R = pytest.importorskip(
+            "make_real_cadence_csv", reason="scripts/ not importable"
+        )
         M = pytest.importorskip("make_multiband_csv", reason="scripts/ not importable")
         shared = 0.24
-        assert shared in S.PERIOD_A1_FLUX[3.75] and shared in M.SIGNAL_A1_FLUX
-        from_slope = S.parse_period_a1(S.PERIOD_A1_DEFAULT)[3.75][
-            S.PERIOD_A1_FLUX[3.75].index(shared)
-        ]
-        from_mb = M.SIGNAL_A1[M.SIGNAL_A1_FLUX.index(shared)]
-        assert from_slope == from_mb  # exact equality, not approx
+        emitted = {
+            "slope": S.parse_period_a1(S.PERIOD_A1_DEFAULT)[3.75][
+                S.PERIOD_A1_FLUX[3.75].index(shared)
+            ],
+            "real_cadence": R.parse_period_a1(R.PERIOD_A1_DEFAULT)[3.75][
+                R.PERIOD_A1_FLUX[3.75].index(shared)
+            ],
+            "multiband": M.SIGNAL_A1[M.SIGNAL_A1_FLUX.index(shared)],
+        }
+        assert len(set(emitted.values())) == 1, emitted  # exact, not approx
+
+    def test_duplicated_source_triads_have_not_drifted(self):
+        """``PERIOD_A1_FLUX`` is duplicated between two generators on purpose
+        (see make_real_cadence_csv's module docstring: the campaigns must be
+        able to diverge deliberately). Single-sourcing the ROUNDING is not
+        enough if the SOURCE values drift apart, so pin them here instead of
+        collapsing a duplication the design asks for.
+        """
+        S = pytest.importorskip(
+            "make_slope_robustness_csv", reason="scripts/ not importable"
+        )
+        R = pytest.importorskip(
+            "make_real_cadence_csv", reason="scripts/ not importable"
+        )
+        assert S.PERIOD_A1_FLUX == R.PERIOD_A1_FLUX
+        assert S.PERIOD_A1_DEFAULT == R.PERIOD_A1_DEFAULT
+        assert S.HIGHALPHA_DEFAULT == R.HIGHALPHA_DEFAULT
 
     def test_flux_amplitude_to_mag_is_the_single_rounding_rule(self):
         from pioran_periodicity.simulate import (
