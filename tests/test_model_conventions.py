@@ -226,6 +226,16 @@ def _multiband_cadence(n_per_band=40, bands=("g", "r", "i"), seed=5):
     )
 
 
+def _flat_lc(lc):
+    """Same time grid, constant unit flux -- isolates the noise prescription
+    from the source's own variability."""
+    from pioran_periodicity.simulate import SimulatedLightCurve
+
+    return SimulatedLightCurve(
+        time=lc.time, flux=np.ones_like(lc.flux), dt_days=lc.dt_days
+    )
+
+
 def _powerlaw_psd(f, index):
     return f ** (-float(index))
 
@@ -535,46 +545,38 @@ class TestNoisePrescriptions:
 
     def test_magnitude_errors_are_converted_to_fractional_flux(self, sim_lc):
         """ZTF branch: noise_model returns magnitudes, so the reported flux
-        error must carry the 0.4 ln10 factor."""
+        error must carry the 0.4 ln10 factor.
+
+        Uses a FLAT light curve so the per-epoch brightness scaling is a
+        no-op and the unit conversion can be asserted exactly.
+        """
         from pioran_periodicity.simulate import (
             MAG_TO_FRACTIONAL_FLUX,
             sample_real_cadence,
         )
 
+        flat = _flat_lc(sim_lc)
         cad = _multiband_cadence(n_per_band=20, bands=("g", "r"), seed=9)
         cad["depth"] = np.nan  # no depth -> ZTF-style branch
         magerr = 0.05
         _, _, flux_err = sample_real_cadence(
-            sim_lc,
+            flat,
             cad,
             noise_model=lambda b, m: np.full(len(m), magerr),
             ref_mag=19.0,
             seed=13,
         )
-        ref_flux = float(np.mean(sim_lc.flux))
-        assert np.allclose(flux_err, MAG_TO_FRACTIONAL_FLUX * magerr * ref_flux)
+        assert np.allclose(flux_err, MAG_TO_FRACTIONAL_FLUX * magerr * 1.0)
         # and is NOT the unconverted magnitude error (the MB3.3 regression)
-        assert not np.allclose(flux_err, magerr * ref_flux)
+        assert not np.allclose(flux_err, magerr * 1.0)
 
-    def test_depth_branch_is_already_fractional_flux(self, sim_lc):
-        """LSST branch: depth_to_fractional_error returns a flux ratio, so it
-        must NOT be multiplied by the magnitude conversion."""
-        from pioran_periodicity.cadence import depth_to_fractional_error
-        from pioran_periodicity.simulate import sample_real_cadence
+    def test_both_branches_are_heteroscedastic(self, sim_lc):
+        """LSST noise varies per epoch with visit depth; ZTF noise now varies
+        per epoch with the source's own simulated brightness.
 
-        cad = _multiband_cadence(n_per_band=20, bands=("g", "r"), seed=9)
-        depth, ref_mag = 23.0, 19.0
-        _, _, flux_err = sample_real_cadence(
-            sim_lc, cad, noise_model=None, ref_mag=ref_mag, seed=13
-        )
-        expected = depth_to_fractional_error(ref_mag, depth) * float(
-            np.mean(sim_lc.flux)
-        )
-        assert np.allclose(flux_err, expected)
-
-    def test_depth_branch_is_heteroscedastic_and_mag_branch_is_not(self, sim_lc):
-        """The documented asymmetry: LSST noise varies per epoch with the
-        visit depth; ZTF noise is constant per object and band."""
+        Replaces an earlier test that asserted the ZTF branch was CONSTANT --
+        that was the homoscedastic convention this change removes.
+        """
         from pioran_periodicity.simulate import sample_real_cadence
 
         cad = _multiband_cadence(n_per_band=20, bands=("g",), seed=9)
@@ -589,11 +591,83 @@ class TestNoisePrescriptions:
         _, _, ztf_err = sample_real_cadence(
             sim_lc,
             cad_ztf,
-            noise_model=lambda b, m: np.full(len(m), 0.05),
+            noise_model=lambda b, m: 0.01 * m,
             ref_mag=19.0,
             seed=13,
         )
-        assert ztf_err.std() == pytest.approx(0.0)
+        assert ztf_err.std() > 0
+
+    def test_ztf_error_is_set_by_brightness_not_by_the_noise_draw(self, sim_lc):
+        """The uncertainty must come from the NOISE-FREE model flux.
+
+        With a flat light curve and a constant noise model the error is exactly
+        constant even though the returned flux is noisy. Had sigma been derived
+        from the realised (noisy) flux, it would scatter -- a noise draw
+        feeding back into its own error bar.
+        """
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        flat = _flat_lc(sim_lc)
+        cad = _multiband_cadence(n_per_band=30, bands=("g",), seed=9)
+        cad["depth"] = np.nan
+        _, flux, flux_err = sample_real_cadence(
+            flat,
+            cad,
+            noise_model=lambda b, m: 0.01 * m,
+            ref_mag=19.0,
+            seed=13,
+        )
+        assert flux.std() > 0  # the flux really is noisy
+        assert flux_err.std() == pytest.approx(0.0, abs=1e-15)
+
+    def test_ztf_error_tracks_source_brightness(self, sim_lc):
+        """A brighter epoch gets a smaller magnitude error, because magerr(mag)
+        increases with magnitude. Sign check, not just "it varies"."""
+        from pioran_periodicity.simulate import sample_real_cadence
+
+        cad = _multiband_cadence(n_per_band=60, bands=("g",), seed=9)
+        cad["depth"] = np.nan
+        # noise_model increasing in magnitude => fainter epochs noisier
+        _, _, flux_err = sample_real_cadence(
+            sim_lc,
+            cad,
+            noise_model=lambda b, m: 0.01 * m,
+            ref_mag=19.0,
+            seed=13,
+        )
+        assert flux_err.std() > 0
+        # sigma_mag decreases with brightness, so the brightest epoch must
+        # carry a strictly smaller error than the faintest one.
+        assert flux_err.min() < flux_err.max()
+
+    def test_per_band_reference_magnitude_comes_from_real_photometry(self, sim_lc):
+        """``ref_mag`` is the r-band catalogue magnitude; each band must use
+        its OWN median real magnitude instead (the g-band colour bias)."""
+        from pioran_periodicity.simulate import _band_reference_magnitudes
+
+        band = np.array(["g"] * 5 + ["r"] * 5, dtype=object)
+        mag_real = np.array(
+            [20.0, 20.2, 20.4, 20.6, 20.8, 19.0, 19.1, 19.2, 19.3, 19.4]
+        )
+        out = _band_reference_magnitudes(band, mag_real, ref_mag=19.0)
+        assert out["g"] == pytest.approx(20.4)
+        assert out["r"] == pytest.approx(19.2)
+        # the r-band catalogue value must NOT have been used for g
+        assert out["g"] != pytest.approx(19.0)
+
+    def test_band_reference_falls_back_to_ref_mag_without_photometry(self):
+        """LSST/OpSim cadences carry no real photometry: fall back cleanly,
+        and do not trip the all-NaN nanmedian trap (defect MB3.4)."""
+        from pioran_periodicity.simulate import _band_reference_magnitudes
+
+        band = np.array(["g"] * 4, dtype=object)
+        out = _band_reference_magnitudes(band, np.full(4, np.nan), ref_mag=18.5)
+        assert out["g"] == pytest.approx(18.5)
+
+        # partial coverage: use the finite subset only
+        mag = np.array([np.nan, 20.0, np.nan, 20.4])
+        out = _band_reference_magnitudes(band, mag, ref_mag=18.5)
+        assert out["g"] == pytest.approx(20.2)
 
 
 class TestOBPLSharpness:

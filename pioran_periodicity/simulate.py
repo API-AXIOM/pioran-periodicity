@@ -197,6 +197,32 @@ def sample_seasonal_pattern(
     return t_years, flux, flux_err
 
 
+# A simulated flux can in principle wander to or below zero; a magnitude is
+# undefined there. Clip the flux/mean ratio at this floor (~7.5 mag brighter
+# than nothing) before taking a logarithm. Reached only by absurd excursions.
+_FLUX_RATIO_FLOOR = 1e-3
+
+
+def _band_reference_magnitudes(band, mag_real, ref_mag: float) -> dict:
+    """Median REAL magnitude per photometric band, for the ZTF noise model.
+
+    ``ref_mag`` is the object's r-band catalogue magnitude; using it for every
+    band biases the non-r noise (quasars here sit ~0.37 mag fainter in g, which
+    made g errors 23% too small). Where the cadence carries real photometry,
+    each band gets its own zero point instead.
+
+    Falls back to ``ref_mag`` for any band with no finite magnitude. Filters
+    with ``np.isfinite`` rather than ``np.nanmedian``, which warns AND returns
+    NaN on an all-NaN slice (defect MB3.4).
+    """
+    out = {}
+    for b in np.unique(band):
+        vals = mag_real[band == b]
+        finite = vals[np.isfinite(vals)]
+        out[b] = float(np.median(finite)) if finite.size else float(ref_mag)
+    return out
+
+
 def sample_real_cadence(
     lc: SimulatedLightCurve,
     cadence,
@@ -236,12 +262,30 @@ def sample_real_cadence(
       observing conditions (21.0-25.2 across the library), so every visit
       gets its own uncertainty.
     * **ZTF** (no depth): the survey's ``magerr(mag)`` polynomial, fitted to
-      real ZTF photometry, evaluated at the object's fixed catalogue
-      magnitude ``ref_mag``. Returns a MAGNITUDE error, converted here with
-      ``MAG_TO_FRACTIONAL_FLUX``. Constant across epochs within a band
-      (homoscedastic), because ``ref_mag`` is fixed per object -- this
-      pipeline simulates one brightness level per object, not per-epoch
-      photometry.
+      real ZTF photometry, evaluated at each epoch's own NOISE-FREE SIMULATED
+      magnitude. Returns a MAGNITUDE error, converted here with
+      ``MAG_TO_FRACTIONAL_FLUX``. Heteroscedastic, and deliberately so: in
+      real ZTF photometry ``magerr`` is very nearly a deterministic function
+      of the source's brightness at that epoch (within-object
+      ``corr(mag, magerr)`` has median 0.998 over 1076 object-bands with >=50
+      epochs), spanning a p90/p10 ratio of ~1.31. Applying the same relation
+      to the simulated brightness sequence reproduces that structure.
+
+      The per-band zero point is the median REAL magnitude in that band from
+      the cadence library, not the scalar ``ref_mag``: ``ref_mag`` is the
+      r-band catalogue magnitude, and feeding it to the g-band polynomial
+      made g errors 23% too small (quasars here are ~0.37 mag fainter in g).
+      Evaluating a convex ``magerr(mag)`` at a single mean magnitude also
+      biases it low by Jensen's inequality -- together those made the old
+      sigma 0.85x the object's real median magerr, and put it outside the
+      object's own real p10-p90 range 68% of the time.
+
+      The magnitude is taken from the noise-free model (latent process +
+      any injected periodic signal and band offset), NOT from the realised
+      noisy flux -- a noise draw must never feed back into its own
+      uncertainty. Note the consequence: an injected periodic signal does
+      imprint on the error bars, because a brighter epoch genuinely has a
+      smaller magnitude error. That is what real photometry does.
 
     The prescriptions differ because the surveys do (ZTF has real photometry
     but no published per-visit depth; the LSST cadence is an OpSim visit
@@ -249,6 +293,13 @@ def sample_real_cadence(
     flux errors is what makes the ZTF-vs-LSST precision comparison
     meaningful. Neither feeds the realised variability back into the
     uncertainty.
+
+    ASYMMETRY, deliberate and open: the LSST branch still evaluates the
+    source term at the fixed ``ref_mag``. It is heteroscedastic through
+    ``depth``, but its brightness term does not track the simulated source
+    the way ZTF's now does. Making LSST per-epoch too is the same argument
+    and is a pending decision, not an oversight -- until it is taken, the
+    LSST branch is bit-for-bit what it was.
 
     ``band_amp`` / ``band_mu`` ({band: value} dicts, default None) inject
     colour-dependent variability: ``y_b(t) = mu_b + a_b * x(t) + noise_b(t)``,
@@ -273,8 +324,12 @@ def sample_real_cadence(
     mjd = cadence["mjd"].to_numpy(dtype=float)
     band = cadence["band"].to_numpy()
     depth = cadence["depth"].to_numpy(dtype=float)
+    if "mag" in getattr(cadence, "columns", ()):
+        mag_real = cadence["mag"].to_numpy(dtype=float)
+    else:
+        mag_real = np.full(len(mjd), np.nan)
     order = np.argsort(mjd)
-    mjd, band, depth = mjd[order], band[order], depth[order]
+    mjd, band, depth, mag_real = mjd[order], band[order], depth[order], mag_real[order]
 
     offset_days = mjd - mjd[0]
     t_obs_days = float(offset_days[-1])
@@ -296,25 +351,6 @@ def sample_real_cadence(
     t_years = lc.time[idx] / DAYS_PER_YEAR
     ref_flux = float(np.mean(lc.flux))
 
-    frac_err = np.empty(len(idx), dtype=float)
-    has_depth = np.isfinite(depth)
-    if has_depth.any():
-        frac_err[has_depth] = depth_to_fractional_error(ref_mag, depth[has_depth])
-    if (~has_depth).any():
-        if noise_model is None:
-            raise ValueError(
-                "cadence has rows without a real `depth` (non-LSST epochs) "
-                "but no noise_model was given"
-            )
-        for b in np.unique(band[~has_depth]):
-            sel = (~has_depth) & (band == b)
-            # noise_model returns a MAGNITUDE error; convert to the
-            # fractional flux error the depth branch already produces
-            frac_err[sel] = MAG_TO_FRACTIONAL_FLUX * noise_model(
-                b, np.full(int(sel.sum()), ref_mag)
-            )
-    flux_err = frac_err * ref_flux
-
     # (n_points,) per-epoch amplitude/offset; only built when colour
     # dependence was actually requested, so the no-band_amp path stays
     # bit-for-bit identical to before this parameter existed.
@@ -329,19 +365,68 @@ def sample_real_cadence(
     else:
         a = None
 
-    flux = latent + rng.normal(0.0, flux_err)
+    signal = None
     if mean_signal is not None:
         signal = np.asarray(mean_signal(t_years), dtype=float)
         # the fitted model divides mean_func by a_b along with the latent
         # process (see kernels.gp_log_likelihood_multiband), so the injected
         # periodic signal is scaled the same way -- injection and inference
         # assume the same thing about the periodic component
-        flux = flux + (signal if a is None else a * signal)
+        signal = signal if a is None else a * signal
+    offsets = None
     if band_mu is not None:
         missing = sorted(set(np.unique(band)) - set(band_mu))
         if missing:
             raise ValueError(f"band_mu has no entry for band(s) {missing}")
-        flux = flux + np.array([band_mu[b] for b in band], dtype=float)
+        offsets = np.array([band_mu[b] for b in band], dtype=float)
+
+    # The source's own noise-free brightness, used ONLY to set the per-epoch
+    # uncertainty -- never the realised noisy flux, which would feed a noise
+    # draw back into its own error bar. ``band_mu`` is deliberately excluded:
+    # it is a per-band offset the fitted model estimates, and the band's real
+    # mean level is already carried by the per-band zero point below.
+    clean = latent if signal is None else latent + signal
+
+    frac_err = np.empty(len(idx), dtype=float)
+    has_depth = np.isfinite(depth)
+    if has_depth.any():
+        # LSST: the brightness term is still the fixed ref_mag -- see the
+        # ASYMMETRY note in the docstring. Unchanged, deliberately.
+        frac_err[has_depth] = depth_to_fractional_error(ref_mag, depth[has_depth])
+    if (~has_depth).any():
+        if noise_model is None:
+            raise ValueError(
+                "cadence has rows without a real `depth` (non-LSST epochs) "
+                "but no noise_model was given"
+            )
+        band_ref = _band_reference_magnitudes(band, mag_real, ref_mag)
+        # brightness relative to the mean level, as a magnitude offset
+        ratio = np.clip(clean / ref_flux, _FLUX_RATIO_FLOOR, None)
+        delta_mag = -2.5 * np.log10(ratio)
+        for b in np.unique(band[~has_depth]):
+            sel = (~has_depth) & (band == b)
+            # noise_model returns a MAGNITUDE error; convert to the
+            # fractional flux error the depth branch already produces
+            frac_err[sel] = MAG_TO_FRACTIONAL_FLUX * noise_model(
+                b, band_ref[b] + delta_mag[sel]
+            )
+
+    # sigma_F = (sigma_F/F) * F. The LSST branch keeps the historical mean-flux
+    # normalisation so its light curves are bit-for-bit unchanged; the ZTF
+    # branch scales by the epoch's own flux, which is what a *fractional* error
+    # means once the fraction itself varies epoch to epoch.
+    flux_err = frac_err * ref_flux
+    if (~has_depth).any():
+        sel = ~has_depth
+        flux_err[sel] = frac_err[sel] * np.clip(
+            clean[sel], _FLUX_RATIO_FLOOR * ref_flux, None
+        )
+
+    flux = latent + rng.normal(0.0, flux_err)
+    if signal is not None:
+        flux = flux + signal
+    if offsets is not None:
+        flux = flux + offsets
 
     if return_band:
         return t_years, flux, flux_err, band
