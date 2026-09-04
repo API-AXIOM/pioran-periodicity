@@ -64,7 +64,18 @@ from pioran_periodicity.simulate import (
 # approximation error is 3% at alpha_high=4.0 but 35% at 4.5. Keeping the
 # truths at <=3.5 leaves them interior to both the prior and the accurate
 # region (1.8% error at n=20). See defect MB3.2.
-HIGHALPHA_DEFAULT = "-2.0,-2.3,-2.6,-2.9,-3.2,-3.5"
+#
+# FOUR points, not six: the Tier-1 design shares one slope axis across the
+# synthetic, real-cadence and multi-band campaigns so they compare slope for
+# slope. Kept identical to make_real_cadence_csv.HIGHALPHA_DEFAULT (asserted
+# in tests/test_model_conventions.py).
+HIGHALPHA_DEFAULT = "-2.0,-2.5,-3.0,-3.5"
+
+# Sine period prior upper bound (years) stamped on every row. The synthetic
+# cadence's 9.53 yr baseline is close to LSST WFD's 9.2-10.0, so it shares
+# LSST's 9.0 (see make_real_cadence_csv.P_MAX_BY_SURVEY, which also explains
+# why ZTF differs and why that is acceptable).
+PERIOD_MAX_DEFAULT = 9.0
 
 # Period-specific (low, at-limit ~50% detect, comfortably-above ~90%+ detect)
 # amplitude triads for the fixed cadence below (NumofWINDOW=20).
@@ -136,6 +147,9 @@ CSV_COLUMNS = [
     "WINDOWwidth",
     "dataLOSSfrac",
     "NumofWINDOW",
+    # run_sim.py reads this, so the prior travels with the scenario rather
+    # than depending on a launch flag being remembered (the MB3.1 mode).
+    "period_max",
 ]
 
 
@@ -253,6 +267,12 @@ def main():
     )
     ap.add_argument("--first-id", type=int, default=0)
     ap.add_argument("--seed", type=int, default=20260728)
+    ap.add_argument(
+        "--period-max", type=float, default=PERIOD_MAX_DEFAULT,
+        help="upper bound (years) of the sine period prior, stamped into "
+        "every row; a signal campaign and the null campaign that calibrates "
+        "it MUST share it (default: %(default)s)",
+    )
     for col, default in FIXED_DEFAULTS.items():
         ap.add_argument(
             f"--{col}", type=type(default), default=default,
@@ -277,7 +297,11 @@ def main():
         args.seed,
         fixed,
     )
-    df = pd.DataFrame(rows).assign(units=MAGNITUDE_UNITS)[CSV_COLUMNS]
+    df = (
+        pd.DataFrame(rows)
+        .assign(units=MAGNITUDE_UNITS, period_max=float(args.period_max))
+        [CSV_COLUMNS]
+    )
     df.to_csv(args.out, index=False)
 
     n_cells = len(highalpha) * (
@@ -287,7 +311,8 @@ def main():
         f"wrote {args.out}: {len(df)} rows ({args.variant} variant, "
         f"{len(highalpha)} highalpha x {n_cells // len(highalpha)} "
         f"(period,A1) cells x {args.n_per_cell} reps, "
-        f"IDs {args.first_id}-{next_id - 1})"
+        f"IDs {args.first_id}-{next_id - 1}, "
+        f"period_max {args.period_max} yr)"
     )
 
 

@@ -97,11 +97,12 @@ OBPL_MAX_REL_ERROR = 0.05
 # Prior configuration for the simulation study. Amplitude-like priors are set
 # from the KNOWN simulation scale, never from the fitted data. No error-scale
 # parameter: the simulation noise is known exactly. Only the sine period cap
-# varies (per config CSV, from its own period column -- see make_cfg/main).
-# Sine period prior, in YEARS (t is in years throughout this pipeline).
-# Identical for null and signal campaigns so their Bayes factors are
-# comparable; 8.0 yr covers the longest injected period (7.5 yr) with
-# headroom.
+# varies, and it is now declared PER SCENARIO CSV in a `period_max` column
+# written by the builders -- see resolve_period_prior.
+# Sine period prior, in YEARS (t is in years throughout this pipeline). The
+# upper bound here is only the legacy fallback for CSVs predating that
+# column; the campaign values are ZTF 6.0 and LSST WFD/synthetic 9.0, which
+# track the surveys' different baselines.
 PERIOD_PRIOR = (0.2, 8.0)
 
 
@@ -182,10 +183,17 @@ def require_magnitude_lightcurve(npz, path) -> None:
 def resolve_period_prior(df, period_max):
     """The sine period prior's upper bound (years) for this scenario CSV.
 
-    Returns ``period_max`` unchanged -- the prior is FIXED, never derived
-    from the data (MB3.1) -- after checking every injected period fits
-    inside it, raising rather than silently fitting a signal the prior
-    excludes.
+    Precedence: an explicit ``--period-max`` wins; otherwise the value the
+    CSV builder STAMPED in its ``period_max`` column; otherwise the legacy
+    ``PERIOD_PRIOR`` default, with a warning. If both are present and they
+    DISAGREE the run is refused -- silently preferring one of them is how a
+    campaign ends up with a prior nobody recorded (MB3.1).
+
+    The stamped column is not "deriving the prior from the data": it is a
+    declared constant that the builder wrote down because it knows which
+    survey the scenario targets (ZTF 6.0 / LSST WFD and synthetic 9.0). What
+    MB3.1 forbade was inferring the bound from the injected ``period``
+    values, which is exactly what the check below only VALIDATES against.
 
     NaN-safe by construction: null CSVs carry an all-NaN ``period`` column,
     and the finite mask leaves an empty array rather than relying on
@@ -193,6 +201,33 @@ def resolve_period_prior(df, period_max):
     all-NaN array warns and returns NaN, and the old ``max(4.0, nan)``
     returned 4.0 only because of Python's argument order).
     """
+    stamped = None
+    if "period_max" in getattr(df, "columns", ()):
+        values = np.unique(np.asarray(df["period_max"], dtype=float))
+        if values.size != 1:
+            raise ValueError(
+                f"scenario CSV has {values.size} distinct period_max values "
+                f"({values}); one scenario file must carry one prior"
+            )
+        stamped = float(values[0])
+
+    if period_max is None:
+        if stamped is None:
+            period_max = PERIOD_PRIOR[1]
+            print(
+                f"WARNING: scenario CSV has no period_max column; falling "
+                f"back to the legacy default {period_max} yr. Rebuild the "
+                f"CSV so the prior is recorded with the scenario."
+            )
+        else:
+            period_max = stamped
+    elif stamped is not None and float(period_max) != stamped:
+        raise ValueError(
+            f"--period-max {float(period_max)!r} contradicts the "
+            f"period_max={stamped!r} stamped in the scenario CSV. Drop the "
+            f"flag to use the stamped value, or rebuild the CSV."
+        )
+
     period_max = float(period_max)
     if not np.isfinite(period_max) or period_max <= 0:
         raise ValueError(f"period_max must be finite and > 0, got {period_max}")
@@ -593,11 +628,13 @@ def main():
     ap.add_argument(
         "--period-max",
         type=float,
-        default=PERIOD_PRIOR[1],
-        help="upper bound (years) of the sine period prior. THE SAME VALUE "
-        "MUST be used for a null campaign and the signal campaign it "
-        "calibrates, or their Bayes factors are not comparable (MB3.1); the "
-        f"default {PERIOD_PRIOR[1]} yr is the campaign-wide convention.",
+        default=None,
+        help="upper bound (years) of the sine period prior. Defaults to the "
+        "value the CSV builder stamped in the scenario's period_max column "
+        "(ZTF 6.0, LSST WFD and synthetic 9.0); passing it here is only for "
+        "CSVs predating that column, and a value contradicting the column "
+        "is an error. THE SAME VALUE MUST be used for a null campaign and "
+        "the signal campaign it calibrates (MB3.1).",
     )
     args = ap.parse_args()
 

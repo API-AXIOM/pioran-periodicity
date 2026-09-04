@@ -20,11 +20,19 @@ NOTE beta=0 is NOT the same as omitting the column: it still records band
 identities and centres on the reference band, so it is a genuine multi-band
 null rather than the legacy single-band path.
 
-**Paired design**: the same real cadence object and the same simulation
-seeds are reused at every (beta, highalpha, A1) cell, exactly as
-``make_real_cadence_csv.py`` does. Object-to-object scatter therefore
-cancels when comparing across beta -- which is what makes 50 sims per cell
-informative about a colour effect.
+**Sampling**: objects are drawn by simple random sampling, FRESH IN EVERY
+(block, beta, highalpha, A1) cell, exactly as ``make_real_cadence_csv.py``
+does -- see that module's docstring for the full argument.
+
+This REPLACES an explicitly paired design (one fixed stratified pool reused
+at every cell, so object-to-object scatter cancelled in beta contrasts).
+That pairing is genuinely lost, and it was the reason 50 sims per cell was
+argued to be informative about a colour effect: the SE of a cell-to-cell
+difference rises ~1.5-1.7x, i.e. ~2.3-2.9x more reps for equal contrast
+power. It is given up on purpose, because the campaign's headline output is
+the ABSOLUTE false-positive rate and a fixed pool makes that number, and
+especially its error bar, conditional on one draw of objects. Read beta
+contrasts here as needing the staged rep counts, not 50.
 
     conda run -n <env> python scripts/make_multiband_csv.py \
         --survey lsst --master-csv <...>/lsst_data/master.csv \
@@ -45,14 +53,20 @@ from pioran_periodicity.simulate import MAGNITUDE_UNITS, flux_amplitude_to_mag
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from make_real_cadence_csv import (  # noqa: E402
     FIXED_DEFAULTS,
-    pick_stratified_objects,
+    MAX_N_EPOCHS_BY_SURVEY,
+    P_MAX_BY_SURVEY,
+    eligible_objects,
 )
 
 # Campaign axes (2026-08-18 design discussion).
 BETAS = (0.0, 0.35, 0.7)
 # -3.5 rather than -4.0: a fitted alpha_high of 4.0 sits exactly on the
 # prior bound, which is itself the SHO/n=20 basis-accuracy limit (MB3.2).
-NULL_HIGHALPHA = (-2.0, -3.5)
+# The SAME four-point axis as the single-band campaigns
+# (make_real_cadence_csv.HIGHALPHA_DEFAULT), so single-band and multi-band
+# FPRs are directly comparable slope for slope -- the earlier design used
+# two slopes here against six there.
+NULL_HIGHALPHA = (-2.0, -2.5, -3.0, -3.5)
 SIGNAL_HIGHALPHA = (-3.5,)
 # Recorded in the fractional FLUX they were calibrated in, converted once to
 # the magnitudes the simulator now emits -- see make_slope_robustness_csv.py.
@@ -64,22 +78,20 @@ CSV_COLUMNS = [
     # `units` marks rms/A1 as magnitudes; run_sim.py refuses a CSV without it.
     "ID", "units", "simSEED", "sampleSEED", "rms", "bendfreq", "lowalpha",
     "highalpha", "sharpness", "period", "A1", "cadence_source", "ref_mag",
-    "band_amp_beta", "block",
+    "period_max", "n_epochs", "dec", "band_amp_beta", "block",
 ]
 
 
-def build_rows(objects, survey, first_id, seed):
-    """Rows for every (block, beta, highalpha, A1) cell x every object.
+def build_rows(population, survey, first_id, seed, n_per_cell, period_max,
+               rep_start=0):
+    """Rows for every (block, beta, highalpha, A1) cell, drawing
+    ``n_per_cell`` objects independently in each one.
 
-    ``objects`` (from pick_stratified_objects) fixes both the reps per cell
-    and WHICH cadence each rep uses; the seeds are drawn once per rep and
-    reused across all cells, so cells differ only in the campaign axes.
+    Same mechanics as ``make_real_cadence_csv.build_rows``: one spawned RNG
+    stream per cell, a permutation sliced ``[rep_start : rep_start +
+    n_per_cell]`` so ``rep_start`` yields a non-overlapping extension of an
+    earlier stage, and rows in random order within a cell.
     """
-    n_per_cell = len(objects)
-    rng = np.random.default_rng(seed)
-    sim_seeds = rng.integers(1, 100_000, size=n_per_cell)
-    sample_seeds = rng.integers(1, 100_000, size=n_per_cell)
-
     cells = []
     for beta in BETAS:
         for ha in NULL_HIGHALPHA:
@@ -89,10 +101,23 @@ def build_rows(objects, survey, first_id, seed):
             for a1 in SIGNAL_A1:
                 cells.append(("signal", beta, ha, SIGNAL_PERIOD, a1))
 
+    n_total = rep_start + n_per_cell
+    if n_total > len(population):
+        raise ValueError(
+            f"need {n_total} distinct objects per cell but the screened "
+            f"population has only {len(population)}"
+        )
+    streams = np.random.SeedSequence(seed).spawn(len(cells))
+
     rows = []
     lc_id = first_id
-    for block, beta, ha, period, a1 in cells:
-        for rep, obj in objects.iterrows():
+    for (block, beta, ha, period, a1), stream in zip(cells, streams):
+        rng = np.random.default_rng(stream)
+        picked = rng.permutation(len(population))[rep_start:n_total]
+        sim_seeds = rng.integers(1, 100_000, size=n_total)[rep_start:]
+        sample_seeds = rng.integers(1, 100_000, size=n_total)[rep_start:]
+        for rep, idx in enumerate(picked):
+            obj = population.iloc[idx]
             rows.append(dict(
                 ID=lc_id,
                 simSEED=int(sim_seeds[rep]),
@@ -102,6 +127,9 @@ def build_rows(objects, survey, first_id, seed):
                 A1=a1,
                 cadence_source=f"{survey}:{obj['object_id']}",
                 ref_mag=float(obj["rmag"]),
+                n_epochs=int(obj["n_epochs"]),
+                dec=float(obj["dec"]),  # see make_real_cadence_csv
+                period_max=float(period_max),
                 band_amp_beta=beta,
                 block=block,
                 **FIXED_DEFAULTS,
@@ -124,16 +152,45 @@ def main():
                     help="first lc_id; default 70000 (ztf) / 80000 (lsst), "
                          "chosen to avoid colliding with existing campaign ids")
     ap.add_argument("--seed", type=int, default=20260818)
+    ap.add_argument("--rep-start", type=int, default=0,
+                    help="build a non-overlapping EXTENSION of an earlier "
+                         "stage; reuse that stage's --seed and --n-sims and "
+                         "give a fresh --id-start")
+    ap.add_argument("--max-n-epochs", type=int, default=None,
+                    help="screen the sampled population; defaults per survey "
+                         f"to {MAX_N_EPOCHS_BY_SURVEY}. Pass 0 to disable")
+    ap.add_argument("--min-baseline-years", type=float, default=None,
+                    help="drop objects with a baseline shorter than this; "
+                         "defaults to the scenario's period_max. 0 disables")
+    ap.add_argument("--period-max", type=float, default=None,
+                    help="sine period prior upper bound (yr), stamped on "
+                         f"every row; defaults per survey to {P_MAX_BY_SURVEY}")
     args = ap.parse_args()
 
     id_start = args.id_start
     if id_start is None:
         id_start = 70000 if args.survey == "ztf" else 80000
 
-    objects = pick_stratified_objects(
-        os.path.expanduser(args.master_csv), args.n_sims, args.seed
+    max_n_epochs = args.max_n_epochs
+    if max_n_epochs is None:
+        max_n_epochs = MAX_N_EPOCHS_BY_SURVEY[args.survey]
+    elif max_n_epochs == 0:
+        max_n_epochs = None
+    period_max = args.period_max
+    if period_max is None:
+        period_max = P_MAX_BY_SURVEY[args.survey]
+
+    population = eligible_objects(
+        os.path.expanduser(args.master_csv), max_n_epochs,
+        min_baseline_years=(
+            period_max if args.min_baseline_years is None
+            else (args.min_baseline_years or None)
+        ),
     )
-    rows = build_rows(objects, args.survey, id_start, args.seed)
+    rows = build_rows(
+        population, args.survey, id_start, args.seed, args.n_sims,
+        period_max, rep_start=args.rep_start,
+    )
     df = pd.DataFrame(rows).assign(units=MAGNITUDE_UNITS)[CSV_COLUMNS]
 
     out_dir = os.path.expanduser(args.out_dir)
@@ -150,7 +207,10 @@ def main():
     print(f"  null highalpha  : {sorted(df[df.block == 'null'].highalpha.unique())}")
     print(f"  signal A1       : {sorted(df[df.block == 'signal'].A1.unique())}")
     print(f"  ids             : {df.ID.min()}-{df.ID.max()}")
-    print(f"  cadence objects : {objects['object_id'].nunique()} (paired across cells)")
+    print(f"  population      : {len(population)} objects "
+          f"(period_max {period_max} yr, max_n_epochs {max_n_epochs})")
+    print(f"  cadence objects : {df['cadence_source'].nunique()} distinct, "
+          f"drawn fresh per cell")
 
 
 if __name__ == "__main__":
