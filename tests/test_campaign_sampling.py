@@ -228,7 +228,7 @@ class TestSlopeAxisIsSharedAcrossCampaigns:
         assert tuple(M.NULL_HIGHALPHA) == expected
 
 
-def _summary(cells, pair="drw", converged=1.0):
+def _summary(cells, pair="DRW", converged=1.0):
     """cells: {highalpha: (detections, n)} -> an aggregate_results-shaped dict."""
     table = {}
     for ha, (k, n) in cells.items():
@@ -247,7 +247,7 @@ class TestStoppingRule:
     """The rule is pre-registered; these tests are what stops it drifting to
     fit whatever the first stage happened to show."""
 
-    def _decide(self, cells, stage, pair="drw"):
+    def _decide(self, cells, stage, pair="DRW"):
         D = _module("campaign_stage_decision")
         return D.decide(D.cells_from_summary(_summary(cells), pair), stage)
 
@@ -345,3 +345,16 @@ class TestBaselineScreen:
     def test_screen_is_off_when_not_requested(self, master):
         R = _module("make_real_cadence_csv")
         assert len(R.eligible_objects(master)) == 5
+
+    def test_pair_name_is_case_insensitive(self):
+        """aggregate_results.py keys pairs "DRW"; a lowercase --pair must not
+        silently report an empty campaign."""
+        D = _module("campaign_stage_decision")
+        summ = _summary({-3.5: (12, 20), -2.0: (0, 20)})
+        assert len(D.cells_from_summary(summ, "drw")) == 2
+        assert len(D.cells_from_summary(summ, "DRW")) == 2
+
+    def test_unknown_pair_fails_loudly(self):
+        D = _module("campaign_stage_decision")
+        with pytest.raises(SystemExit, match="OBPL|no model pair"):
+            D.cells_from_summary(_summary({-3.5: (1, 20)}), "OBPL")

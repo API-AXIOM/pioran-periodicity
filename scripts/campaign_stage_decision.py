@@ -73,11 +73,20 @@ def cells_from_summary(summary: dict, pair: str) -> list[dict]:
     the aggregator's outcome counts are the FPR numerator directly.
     """
     table = summary["table"] if "table" in summary else summary
+    # aggregate_results.py keys its pairs "DRW"/"CARMA21"/"OBPL"; accept any
+    # casing rather than silently reporting an empty campaign.
+    available = sorted({k for pairs in table.values() for k in pairs})
+    match = {k.lower(): k for k in available}.get(pair.lower())
+    if match is None:
+        raise SystemExit(
+            f"no model pair {pair!r} in this summary; it has: "
+            f"{', '.join(available) or '(none)'}"
+        )
     cells = []
     for key, pairs in table.items():
-        if pair not in pairs:
+        if match not in pairs:
             continue
-        entry = pairs[pair]
+        entry = pairs[match]
         n = entry["n"]
         k = entry["outcomes"]["detect"]
         slope = None
@@ -177,8 +186,10 @@ def main():
     ap.add_argument("--summary", required=True,
                     help="summary JSON from aggregate_results.py "
                          "(--group-cols highalpha)")
-    ap.add_argument("--pair", default="drw",
-                    help="model pair to decide on (default: drw)")
+    ap.add_argument("--pair", default="DRW",
+                    help="model pair to decide on, as keyed by "
+                         "aggregate_results.py: DRW, CARMA21 or OBPL "
+                         "(case-insensitive; default: %(default)s)")
     ap.add_argument("--stage", type=int, required=True,
                     help="reps per cell in the stage just finished (20/50/100)")
     ap.add_argument("--min-converged-frac", type=float, default=0.9,
