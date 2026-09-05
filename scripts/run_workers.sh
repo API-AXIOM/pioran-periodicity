@@ -115,7 +115,14 @@ if [ $# -ge 4 ]; then
     [ -n "$CHECKPOINT_DIR" ] && ARGS+=(--checkpoint-dir "$CHECKPOINT_DIR")
     n=0
     while true; do
-        conda run -n "$CONDA_ENV" python "$SCRIPT_DIR/run_sim.py" "${ARGS[@]}" \
+        # --no-capture-output: without it `conda run` BUFFERS the child's
+        # stdout/stderr and writes the lot only when the process exits. A
+        # healthy worker therefore has a ZERO-BYTE log for its entire run --
+        # hours -- and content appears only on a crash or on DONE, which
+        # makes an empty log indistinguishable from a dead one and makes
+        # `tail -f` useless for watching progress.
+        conda run --no-capture-output -n "$CONDA_ENV" \
+            python -u "$SCRIPT_DIR/run_sim.py" "${ARGS[@]}" \
             >> "$LOG" 2>&1
         if tail -50 "$LOG" | grep -q "^DONE"; then
             echo "$(date): finished cleanly" >> "$LOG"
