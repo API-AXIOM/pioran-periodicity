@@ -71,6 +71,24 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("campaign_dir")
     ap.add_argument("--stall-min", type=float, default=45.0)
+    ap.add_argument(
+        "--startup-grace", type=float, default=900.0,
+        help="seconds to wait for the FIRST worker to appear before giving "
+             "up. run_workers.sh starts this watchdog immediately after "
+             "launching its supervisors, but each of those runs `conda run`, "
+             "which takes seconds to exec the real python child -- so at the "
+             "first poll only the (correctly excluded) wrapper processes "
+             "exist. Exiting then means no hang protection for the entire "
+             "campaign, silently. Default 15 min covers a slow conda start "
+             "and any environment-solving delay.",
+    )
+    ap.add_argument(
+        "--exit-after-empty", type=int, default=3,
+        help="consecutive empty polls before exiting once workers HAVE been "
+             "seen. Not 1: the supervisor sleeps 10s between restarts, so a "
+             "campaign that is merely between fits can momentarily show no "
+             "workers.",
+    )
     ap.add_argument("--poll", type=float, default=300.0)
     args = ap.parse_args()
 
@@ -81,11 +99,34 @@ def main() -> int:
 
     # pid -> (last progress signature, wall time we first saw that signature)
     seen: Dict[int, Tuple[float, float]] = {}
+    started = time.time()
+    seen_any = False
+    empty_polls = 0
     while True:
         pids = worker_pids(tag)
         if not pids:
-            log(logfile, f"no run_sim.py workers left for {tag} -- watchdog exiting")
-            return 0
+            if not seen_any:
+                waited = time.time() - started
+                if waited >= args.startup_grace:
+                    log(logfile, f"no workers appeared for {tag} within "
+                                 f"{args.startup_grace:.0f}s -- watchdog exiting")
+                    return 0
+                # Poll fast while waiting for the first worker: `conda run`
+                # needs a few seconds, and at --poll granularity we would
+                # sleep through the whole startup.
+                time.sleep(min(10.0, args.poll))
+                continue
+            empty_polls += 1
+            if empty_polls >= args.exit_after_empty:
+                log(logfile, f"no run_sim.py workers left for {tag} "
+                             f"({empty_polls} empty polls) -- watchdog exiting")
+                return 0
+            time.sleep(args.poll)
+            continue
+        if not seen_any:
+            log(logfile, f"watching {len(pids)} worker(s) for {tag}")
+        seen_any = True
+        empty_polls = 0
         for pid in pids:
             sig = progress_sig(pid, campaign_dir)
             if sig is None:
