@@ -948,3 +948,54 @@ class TestData:
 # are kept only in the thesis-replication archive (workspace/tests/), not in
 # this package's own test suite.
 # ===========================================================================
+
+
+class TestCheckpointRecovery:
+    """A checkpoint written by a process killed mid-write is truncated. With
+    ultranest's default resume="resume" that is PERMANENT: every restart
+    reopens the same broken file and dies before sampling, so a supervisor
+    that restarts on exit burns its entire retry budget doing no work.
+    Observed 2026-09-04 on the remote LSST campaign -- 8 of 10 workers lost
+    to `truncated file: eof = 96 ... stored_eof = 2048`."""
+
+    def _tiny_spec(self):
+        import pioran_periodicity as pp
+
+        cfg = pp.PriorConfig(
+            log10_variance=(-2.0, 1.0), log10_fbend=(-2.0, 1.0),
+            alpha_low=(0.0, 2.0), alpha_high_max=4.0, err_scale=None,
+        )
+        return pp.build_family("drw", cfg, variants=("plain",)).members["drw"]
+
+    def test_truncated_checkpoint_is_discarded_not_fatal(self, tmp_path):
+        import warnings as _w
+
+        import numpy as np
+
+        from pioran_periodicity.inference import SamplerSettings, run_nested
+
+        rng = np.random.default_rng(0)
+        t = np.sort(rng.uniform(0, 5, 40))
+        y = rng.normal(0, 1, 40)
+        e = np.full(40, 0.1)
+
+        log_dir = tmp_path / "fit"
+        (log_dir / "results").mkdir(parents=True)
+        # exactly the remote signature: an HDF5 header truncated mid-write
+        with open(log_dir / "results" / "points.hdf5", "wb") as fh:
+            fh.write(b"\x89HDF\r\n\x1a\n" + b"\x00" * 88)
+
+        with _w.catch_warnings(record=True) as caught:
+            _w.simplefilter("always")
+            res = run_nested(
+                self._tiny_spec(), t, y, e,
+                settings=SamplerSettings(
+                    seed=1, min_num_live_points=50, frac_remain=0.5,
+                    max_ncalls=3000,
+                ),
+                log_dir=str(log_dir), show_status=False,
+            )
+        assert np.isfinite(res.logz)
+        assert any(
+            "unusable ultranest checkpoint" in str(w.message) for w in caught
+        ), [str(w.message) for w in caught]

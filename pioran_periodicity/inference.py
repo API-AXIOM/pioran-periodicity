@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import time as _time
+import warnings
 from dataclasses import asdict, dataclass, field
 
 import numpy as np
@@ -145,13 +146,41 @@ def run_nested(
             return _LOW
         return float(val)
 
-    sampler = ultranest.ReactiveNestedSampler(
-        names,
-        loglike_vec,
-        lambda cube: prior(cube),
-        log_dir=log_dir,
-        resume=resume,
-    )
+    def _build(resume_mode):
+        return ultranest.ReactiveNestedSampler(
+            names,
+            loglike_vec,
+            lambda cube: prior(cube),
+            log_dir=log_dir,
+            resume=resume_mode,
+        )
+
+    try:
+        sampler = _build(resume)
+    except OSError as exc:
+        # A checkpoint written by a process that was killed mid-write is
+        # TRUNCATED, and h5py raises here -- before any sampling happens.
+        # With resume="resume" that is PERMANENT: every restart reopens the
+        # same broken file and dies identically, so a supervisor that
+        # restarts on exit burns its whole retry budget without doing any
+        # work (observed 2026-09-04: workers "giving up after 100 restarts"
+        # on `truncated file: eof = 96 ... stored_eof = 2048`).
+        #
+        # A checkpoint is a cache, never the result, so the safe response is
+        # to discard it and redo that one fit rather than lose the worker.
+        # Loud, because silently restarting a long fit from zero is a cost
+        # someone should see. Only OSError from opening the log dir is
+        # caught; anything raised later still propagates.
+        if log_dir is None:
+            raise
+        warnings.warn(
+            f"unusable ultranest checkpoint in {log_dir!r} ({exc}); "
+            f"discarding it and restarting this fit from scratch. This is "
+            f"normally the residue of a worker killed mid-write.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        sampler = _build("overwrite")
     # Slice sampling for higher-dimensional problems: region rejection
     # sampling stalls there (see SamplerSettings docstring).
     if len(names) >= settings.step_sampler_min_ndim:
@@ -187,8 +216,6 @@ def run_nested(
     ncall = int(result.get("ncall", 0))
     converged = ncall < settings.max_ncalls
     if not converged or ess < 10 * len(names):
-        import warnings
-
         warnings.warn(
             f"fit '{spec.name}': "
             + ("truncated by max_ncalls; " if not converged else "")
