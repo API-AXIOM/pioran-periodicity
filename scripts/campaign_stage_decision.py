@@ -119,6 +119,20 @@ def decide(cells: list[dict], stage: int) -> dict:
     steepest = cells[0]   # most negative highalpha
     shallowest = cells[-1]
 
+    # The terminal stage is checked FIRST. The "all cells low" clause below
+    # prescribes going to 100, which is incoherent once you ARE at 100 -- it
+    # told the synthetic n=100 campaign to "extend to 100". The design's
+    # ladder ends at 100; going further is a new decision, not this rule's.
+    if stage >= STAGES[-1]:
+        return {
+            "verdict": "STOP",
+            "reason": (
+                f"n={stage} is the final stage of the pre-registered ladder "
+                f"{STAGES}; max cell FPR {max(fprs):.1%}. Going beyond 100 is "
+                f"a fresh decision, not something this rule prescribes."
+            ),
+        }
+
     if max(fprs) < ALL_CELLS_LOW:
         return {
             "verdict": "EXTEND",
@@ -173,9 +187,11 @@ def decide(cells: list[dict], stage: int) -> dict:
             ),
         }
 
+    # Unreachable for stage >= STAGES[-1] (handled above); kept for a stage
+    # that is off the ladder entirely, e.g. an ad-hoc n=75.
     return {
         "verdict": "STOP",
-        "reason": f"n={stage} is the final stage; the rule prescribes no extension",
+        "reason": f"n={stage} is past the ladder's stages; no extension prescribed",
     }
 
 

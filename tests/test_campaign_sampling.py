@@ -298,6 +298,18 @@ class TestStoppingRule:
         v = self._decide({-3.5: (30, 100), -2.0: (2, 100)}, 100)
         assert v["verdict"] == "STOP"
 
+    def test_stage_100_stops_even_when_every_cell_is_low(self):
+        """Regression: the 'all cells under 10%' clause was checked before the
+        terminal-stage check, so a completed n=100 campaign was told to
+        'extend to 100' -- advice that cannot be acted on."""
+        v = self._decide({-3.5: (2, 100), -3.0: (2, 100), -2.0: (0, 100)}, 100)
+        assert v["verdict"] == "STOP"
+        assert "final stage" in v["reason"]
+
+    def test_stage_100_stops_when_all_cells_are_zero(self):
+        v = self._decide({-3.5: (0, 100), -2.0: (0, 100)}, 100)
+        assert v["verdict"] == "STOP"
+
     def test_steepest_cell_is_the_most_negative_slope(self):
         D = _module("campaign_stage_decision")
         cells = D.cells_from_summary(
