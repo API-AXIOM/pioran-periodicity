@@ -59,7 +59,16 @@ from make_real_cadence_csv import (  # noqa: E402
 )
 
 # Campaign axes (2026-08-18 design discussion).
-BETAS = (0.0, 0.35, 0.7)
+# Fixed at the LSST community value (2026-09-08): multi-band AGN simulations
+# for Rubin use sigma_DRW ~ lambda^-0.479 at the filter effective wavelengths
+# (MacLeod et al. 2010), so this matches other LSST forecasts. Our own
+# within-object measurement on 401 paired ZTF g/r light curves gives
+# beta = 0.718 [0.637, 0.805]; the two differ because MacLeod's is a
+# cross-object regression while ours is within-object. Kept as a single value,
+# not a grid: the intrinsic object-to-object spread in beta is unresolved
+# (observed sd 1.01 vs 1.47 expected from estimator noise alone).
+# A {0, 0.479, 0.70} sensitivity arm is deferred to after the baseline runs.
+BETAS = (0.479,)
 # -3.5 rather than -4.0: a fitted alpha_high of 4.0 sits exactly on the
 # prior bound, which is itself the SHO/n=20 basis-accuracy limit (MB3.2).
 # The SAME four-point axis as the single-band campaigns

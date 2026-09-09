@@ -311,6 +311,51 @@ def _band_reference_magnitudes(band, mag_real, ref_mag: float) -> dict:
     return out
 
 
+def bin_nightly(t_years, y, yerr, band=None):
+    """Combine epochs falling in the same night AND the same band.
+
+    Applied to simulated and real light curves alike, so any comparison
+    between them stays like-for-like. Binning is PER BAND -- never across
+    bands, which would destroy the colour information the multi-band model
+    exists to measure.
+
+    Magnitudes are combined by inverse-variance weighting, so the binned
+    uncertainty is 1/sqrt(sum 1/sigma_i^2) and the binned time is the same
+    weighted mean. Nights are ``floor(mjd)``; a site's observing night does
+    not straddle that boundary for the surveys used here.
+
+    Justification: the campaigns search periods of months to years, so
+    intra-night sampling carries no signal -- it only inflates the frequency
+    range the basis expansion must cover, and hence n_components.
+    """
+    t = np.asarray(t_years, dtype=float)
+    y = np.asarray(y, dtype=float)
+    yerr = np.asarray(yerr, dtype=float)
+    night = np.floor(t * DAYS_PER_YEAR).astype(np.int64)
+    if band is None:
+        keys = night
+    else:
+        band = np.asarray(band, dtype=object)
+        # pair each night with its band; np.unique over a 2-column view
+        keys = np.array([f"{b}|{n}" for b, n in zip(band, night)], dtype=object)
+    _, inv = np.unique(keys, return_inverse=True)
+    w = 1.0 / np.square(yerr)
+    sw = np.bincount(inv, weights=w)
+    y_b = np.bincount(inv, weights=w * y) / sw
+    t_b = np.bincount(inv, weights=w * t) / sw
+    e_b = 1.0 / np.sqrt(sw)
+    if band is None:
+        band_b = None
+    else:
+        first = np.zeros(len(sw), dtype=int)
+        first[inv[::-1]] = np.arange(len(inv))[::-1]
+        band_b = band[first]
+    order = np.argsort(t_b)
+    if band_b is None:
+        return t_b[order], y_b[order], e_b[order], None
+    return t_b[order], y_b[order], e_b[order], band_b[order]
+
+
 def sample_real_cadence(
     lc: SimulatedLightCurve,
     cadence,

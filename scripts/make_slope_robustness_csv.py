@@ -194,15 +194,32 @@ def build_rows(highalpha, period_a1, n_per_cell, rep_start, first_id, seed, fixe
     extension never touches the pilot's rows/IDs, so it only needs its own
     reps to be reproducible and non-overlapping, which they are.
     """
-    rng = np.random.default_rng(seed)
+    # Seeds are drawn PER CELL, not shared across cells. Sharing them (the
+    # pre-2026-09-08 behaviour, `sim_seeds[rep]` for every cell) gave every
+    # slope cell the same random stream -- common random numbers, which pairs
+    # the slope axis and makes the cells non-independent. The real-cadence
+    # builder already assigns a distinct seed to every row, so this makes the
+    # two builders consistent: light curves differ across slope cells exactly
+    # as they do for ZTF/LSST.
+    #
+    # A per-cell child stream keeps the `rep_start` extension property: the
+    # same cell index replays the same sequence, so an extension skipping the
+    # first `rep_start` draws stays non-overlapping with the base run.
     n_total = rep_start + n_per_cell
-    sim_seeds = rng.integers(1, 100_000, size=n_total)[rep_start:]
-    sample_seeds = rng.integers(1, 100_000, size=n_total)[rep_start:]
+
+    def _cell_seeds(cell_index):
+        cell_rng = np.random.default_rng([seed, cell_index])
+        sim = cell_rng.integers(1, 100_000, size=n_total)[rep_start:]
+        sample = cell_rng.integers(1, 100_000, size=n_total)[rep_start:]
+        return sim, sample
 
     rows = []
     lc_id = first_id
+    cell_index = 0
     for ha in highalpha:
         if period_a1 is None:
+            sim_seeds, sample_seeds = _cell_seeds(cell_index)
+            cell_index += 1
             for rep in range(n_per_cell):
                 rows.append(
                     dict(
@@ -219,6 +236,8 @@ def build_rows(highalpha, period_a1, n_per_cell, rep_start, first_id, seed, fixe
         else:
             for period, a1_list in period_a1.items():
                 for a1 in a1_list:
+                    sim_seeds, sample_seeds = _cell_seeds(cell_index)
+                    cell_index += 1
                     for rep in range(n_per_cell):
                         rows.append(
                             dict(

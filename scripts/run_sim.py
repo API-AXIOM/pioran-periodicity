@@ -65,6 +65,7 @@ import pandas as pd
 
 import pioran_periodicity as pp
 from pioran_periodicity.cadence import CadenceLibrary
+from pioran_periodicity.simulate import bin_nightly
 from pioran_periodicity.inference import SamplerSettings, run_nested, save_result
 from pioran_periodicity.kernels import FrequencyBand, psd_approximation_error
 from pioran_periodicity.means import sine_mean
@@ -92,6 +93,9 @@ PSD_NORM = 20.0
 # cadence; bump components until the PSD approximation is accurate.
 OBPL_N_COMPONENTS = 20
 OBPL_MAX_REL_ERROR = 0.05
+# Hard ceiling on the basis size: never fit with more than this many
+# components, even if the accuracy threshold is not met (a warning is issued).
+OBPL_MAX_COMPONENTS = 60
 
 
 # Prior configuration for the simulation study. Amplitude-like priors are set
@@ -115,7 +119,16 @@ def make_cfg(period_max: float = PERIOD_PRIOR[1]) -> pp.PriorConfig:
         log10_variance=(-4.0, 1.0),
         log10_fbend=(-3.0, 2.0),
         alpha_low=(0.0, 2.0),
-        alpha_high_max=4.0,
+        # Raised 4.0 -> 5.0 on 2026-09-08. At the campaigns' steepest truth
+        # (alpha_high = 3.5) the posterior was already pressed against the old
+        # bound: mean posterior mass above 3.8 was 0.177 (synthetic) / 0.110
+        # (ZTF), median 95th percentile 3.94. That truncates the OBPL arm in
+        # exactly the cell carrying the slope-axis result. n_components is
+        # auto-selected against this bound (choose_obpl_band), so raising it
+        # also raises n where needed. Set to 4.5, not 5.0: at 5.0 40% of real ZTF
+        # light curves cannot reach 5% PSD accuracy even at the n=60 ceiling.
+        # keeping the PSD approximation error under OBPL_MAX_REL_ERROR.
+        alpha_high_max=4.5,
         # Relative (hierarchical) sine amplitude: the prior is on
         # f = A / sigma_process, not on an absolute amplitude, so it is
         # scale-free across objects AND unaffected by the move from flux to
@@ -123,7 +136,16 @@ def make_cfg(period_max: float = PERIOD_PRIOR[1]) -> pp.PriorConfig:
         # has no sampled process variance -- and equals the campaigns' known
         # simulated rms, so f = A1/scale there. Both numerator and
         # denominator are now magnitudes, so f is numerically unchanged.
-        sine_amplitude_fraction=1.2,
+        # Lowered 1.2 -> 0.7 on 2026-09-08. 1.2 was anchored on one object
+        # (PG 1302-102, f = 2.3). The Doppler-boost channel -- the one a
+        # sinusoidal template actually tests -- predicts a few % to ~10%
+        # fractional amplitude (D'Orazio & Charisi 2023), which against our
+        # measured sigma = 0.110 mag gives f with median 0.48. 0.7 sits above
+        # that so PG 1302-like amplitudes stay at the 0.5% level rather than
+        # 1e-4. This SHIFTS THE NULL BAYES FACTORS by -0.31 dex (measured by
+        # prior-swap reweighting), i.e. more false positives: report the FPR
+        # with its f0, and ship the sensitivity curve.
+        sine_amplitude_fraction=0.7,
         sine_amplitude_scale=0.15 * FRACTIONAL_FLUX_TO_MAG,
         period=(PERIOD_PRIOR[0], period_max),
         err_scale=None,
@@ -411,6 +433,15 @@ def simulate_or_load(
             seed=int(row["sampleSEED"]),
         )
         band = None
+
+    # Nightly binning, per band, applied to EVERY light curve (2026-09-08).
+    # The campaigns search periods of months to years, so intra-night sampling
+    # carries no signal; it only widens the frequency range the OBPL basis must
+    # cover, driving n_components up. The identical function is applied to real
+    # light curves when they are compared against these, so the comparison stays
+    # like-for-like. No-op for the synthetic path (obs_per_night=1).
+    t, y, yerr, band = bin_nightly(t, y, yerr, band)
+
     t = t - t[0]
     if band is None:
         y = y - np.median(y)
@@ -474,13 +505,31 @@ def obpl_components(t, alpha_high_max=None):
         alpha_high_max = pp.PriorConfig().alpha_high_max
     band = FrequencyBand.from_times(t)
     n = OBPL_N_COMPONENTS
-    while n <= 60:
+    while n <= OBPL_MAX_COMPONENTS:
         err = psd_approximation_error(
             0.5, 0.0, float(alpha_high_max), band, n_components=n
         )
         if err["max_rel_error"] <= OBPL_MAX_REL_ERROR:
             return band, n, err
         n += 10
+    # CLAMP at OBPL_MAX_COMPONENTS rather than returning an even larger n.
+    # Previously this fell out of the loop and returned n=70 with the accuracy
+    # threshold UNMET and nothing said so -- an expensive fit that was also
+    # inaccurate. Now the cap is honoured and the shortfall is warned about and
+    # returned in `err` so the caller can record it.
+    n = OBPL_MAX_COMPONENTS
+    err = psd_approximation_error(
+        0.5, 0.0, float(alpha_high_max), band, n_components=n
+    )
+    err["accuracy_unmet"] = True
+    warnings.warn(
+        f"OBPL basis cannot reach {OBPL_MAX_REL_ERROR:.0%} accuracy at "
+        f"alpha_high={alpha_high_max} for this light curve: max relative PSD "
+        f"error is {err['max_rel_error']:.1%} at the n={n} cap. The fit will "
+        f"proceed at n={n} with this approximation error.",
+        RuntimeWarning,
+        stacklevel=2,
+    )
     return band, n, err
 
 
@@ -518,7 +567,11 @@ def build_models(
             "carma", cfg, variants=("plain", "sine"), carma_order=(2, 1), **mb
         )
     if "obpl" in want:
-        band, n_comp, _ = obpl_components(t)
+        # Pass the FITTED prior's bound, not PriorConfig()'s package default:
+        # the basis expansion must be accurate over exactly the range the
+        # prior can reach. Reading the default here while make_cfg raised the
+        # bound would let the sampler visit slopes the basis cannot represent.
+        band, n_comp, _ = obpl_components(t, alpha_high_max=cfg.alpha_high_max)
         families["obpl"] = pp.build_family(
             "obpl", cfg, variants=("plain", "sine"), band=band, n_components=n_comp,
             **mb,
