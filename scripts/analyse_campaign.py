@@ -101,7 +101,13 @@ ESS_FLOOR = 200.0
 # wants is empty for a cell.
 FALLBACK_ORDER = ("clear_non_detection", "inconclusive", "false_positive")
 
-DATA_ROOT = os.path.expanduser("~/work/data/quasar_cadences/v2")
+# The v2/ tree was merged into results/ on 2026-09-18, so raw fits
+# (<campaign>/results, /lightcurves, /checkpoints, /logs) and derived products
+# (<campaign>/summary.json, figures, examples/) now live side by side under one
+# per-campaign directory. DATA_ROOT and DEFAULT_OUT_ROOT are therefore the same
+# root; they are kept as separate names because the script reads one and writes
+# the other.
+DATA_ROOT = os.path.expanduser("~/work/data/quasar_cadences/results")
 SIMS_ROOT = os.path.expanduser(
     "~/work/repositories/pioran_periodicity_ai/workspace/v2_sims"
 )

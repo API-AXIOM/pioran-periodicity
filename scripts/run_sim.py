@@ -110,14 +110,48 @@ OBPL_MAX_COMPONENTS = 60
 PERIOD_PRIOR = (0.2, 8.0)
 
 
-def make_cfg(period_max: float = PERIOD_PRIOR[1]) -> pp.PriorConfig:
+# Lower bound of the log10_fbend prior, PER CAMPAIGN (2026-09-18).
+#
+# Pioran builds the basis expansion on [f_min/S_low, f_max*S_high]. Below
+# f_min/S_low the approximated kernel can lose positive-definiteness and the
+# likelihood develops a POLE: logL climbs to +1e6, flips sign and plunges to
+# -1e6 within less than 0.01 dex in log10_fbend. Four v2 LSST single-band fits
+# (310189/310206/310335/310372) climbed such a pole under the old (-3.0, 2.0)
+# prior and reported |logZ| ~ 1e17-1e19 with ESS = 1. Raising max_ncalls
+# cannot help -- the likelihood is unbounded there -- and inference.py's guard
+# only rejects NON-finite values, which these are not.
+#
+# Nothing is lost scientifically: the data cannot distinguish WHERE below the
+# grid floor the bend sits, only that it is below it.
+#
+# The grid floor is log10(f_min/S_low) and so varies per light curve. A single
+# safe constant must sit at or above the HIGHEST floor in that campaign's pool
+# (measured from the stored band metadata of all 3200 v2 OBPL fits):
+#
+#   campaign   f_min range      grid-floor range      safe constant
+#   ZTF        0.1317-0.1647    -2.181 .. -2.084      -2.0
+#   LSST       0.1000-0.1091    -2.301 .. -2.263      -2.25
+#   synthetic  0.1049-0.1060    -2.280 .. -2.276      -2.25
+#
+# NOTE the eight LSST reruns of the four pole-affected light curves were done
+# at -2.3, which is 0.02-0.04 dex BELOW the LSST floor for most of that pool.
+# That is recorded rather than redone; see comparison_reports/
+# v2_null_campaign_results.tex.
+LOG10_FBEND_MIN = {"ztf": -2.0, "lsst": -2.25, "synthetic": -2.25}
+DEFAULT_LOG10_FBEND_MIN = -2.25
+
+
+def make_cfg(
+    period_max: float = PERIOD_PRIOR[1],
+    log10_fbend_min: float = DEFAULT_LOG10_FBEND_MIN,
+) -> pp.PriorConfig:
     return pp.PriorConfig(
         # mag^2 now that the simulator generates magnitudes (it was flux^2).
         # The campaigns' truth, sigma = 0.163 mag, is log10 var = -1.58 --
         # interior to this range, as -1.65 was under the old convention, so
         # the bounds need no change.
         log10_variance=(-4.0, 1.0),
-        log10_fbend=(-3.0, 2.0),
+        log10_fbend=(log10_fbend_min, 2.0),
         alpha_low=(0.0, 2.0),
         # Raised 4.0 -> 5.0 on 2026-09-08. At the campaigns' steepest truth
         # (alpha_high = 3.5) the posterior was already pressed against the old
@@ -679,6 +713,17 @@ def main():
         "and throwing it away.",
     )
     ap.add_argument(
+        "--log10-fbend-min",
+        type=float,
+        default=DEFAULT_LOG10_FBEND_MIN,
+        help="lower bound of the log10_fbend prior. MUST sit at or above the "
+        "highest basis grid floor log10(f_min/S_low) in this campaign's pool, "
+        "or the sampler can reach a likelihood pole where the approximated "
+        "kernel loses positive-definiteness (|logZ| ~ 1e18, ESS = 1; raising "
+        f"--max-ncalls does NOT help). Per campaign: {LOG10_FBEND_MIN}. "
+        "The same value must be used for a cadence's null and signal runs.",
+    )
+    ap.add_argument(
         "--period-max",
         type=float,
         default=None,
@@ -704,7 +749,11 @@ def main():
     cadence_lib = CadenceLibrary.from_cache(args.cadence_library) if args.cadence_library else None
 
     period_max = resolve_period_prior(df, args.period_max)
-    cfg = make_cfg(period_max)
+    cfg = make_cfg(period_max, log10_fbend_min=args.log10_fbend_min)
+    print(
+        f"log10_fbend prior = ({cfg.log10_fbend[0]}, {cfg.log10_fbend[1]})",
+        flush=True,
+    )
 
     picked = (
         df[df[args.filter_col] == args.filter_value]
