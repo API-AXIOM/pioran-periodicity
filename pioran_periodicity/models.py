@@ -556,7 +556,7 @@ def build_family(
             # OBSERVED units, so it belongs in band_mu[0] -- NOT in
             # mean_func, which is in latent units and gets scaled by a_b
             mean_func = shape_mean
-            # (n_bands,), index 0 is the pinned reference band (a=1, mu=0)
+            # (n_bands,), index 0 is the pinned reference band (a=1, mu=mu0)
             band_amp = np.array(
                 [1.0] + [pdict[f"a_{b}"] for b in _photometric_bands]
             )

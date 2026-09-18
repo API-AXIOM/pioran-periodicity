@@ -13,6 +13,12 @@ docstring. Deferred/heavy imports (`ultranest`, `pioranpy`) mean each script
 needs an environment with the full runtime dependencies installed
 (`pip install -e ".[simulation]"` plus a working `pioranpy`).
 
+## `lsst/`
+
+Survey-specific LSST drivers: OpSim footprint/visit-density maps, rebuilding
+the unstratified Milliquas parent, and post-stratifying a campaign FPR onto
+it. Extra dependencies (`healpy`, `astroquery`) — see `scripts/lsst/README.md`.
+
 ## `run_sim.py`
 
 Simulates light curves from a bending-power-law PSD (given a scenario config

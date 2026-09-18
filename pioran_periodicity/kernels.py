@@ -351,8 +351,9 @@ def gp_log_likelihood_multiband(
     ``band``, ``t``, ``y``, ``yerr`` are 1-D arrays of equal length
     n_points (one entry per data point). ``band`` holds integer codes
     (see ``multiband.BandEncoding.encode``) indexing ``band_amp``/
-    ``band_mu``, 1-D arrays of length n_bands with ``band_amp[0] == 1.0``,
-    ``band_mu[0] == 0.0`` for the pinned reference band (index 0).
+    ``band_mu``, 1-D arrays of length n_bands with ``band_amp[0] == 1.0`` and
+    ``band_mu[0]`` the reference band's own free offset (``mu0``, not fixed
+    at zero) for the pinned reference band (index 0).
 
     The general model is
 

@@ -19,8 +19,8 @@ a signal was injected). Omit ``--config-csv`` to group directly off that
 directory was assembled from multiple pilot/extension CSVs whose ID ranges
 you don't want to reconcile by hand.
 
-Convergence gating
-------------------
+Convergence and ESS gating
+---------------------------
 A fit truncated by ``max_ncalls`` has not finished integrating: its ``logz``
 is wherever the integration happened to be when the cap fired, and its
 posterior has typically collapsed onto a handful of live points. Such a fit
@@ -34,6 +34,14 @@ default this script **drops any pair where either fit failed to converge**
 and reports the retained fraction per cell. Pass ``--keep-unconverged`` to
 restore the old unfiltered behaviour (for diagnosing a run, not for
 quoting results).
+
+Independently, this script also **drops any pair where either fit's posterior
+ESS falls below a floor (default 200.0)**. A fit can be flagged converged and
+still have ESS=1 if it stopped on a likelihood blow-up below ``max_ncalls``; in
+this case the evidence value is unreliable regardless of the convergence flag.
+The ESS floor is chosen to sit in the gap between known pathological cases
+(ESS=1) and the healthy population. This gate is always applied (independent
+of ``--keep-unconverged``) and is configurable via ``--min-ess``.
 """
 
 from __future__ import annotations
@@ -62,18 +70,21 @@ def classify(b):
 
 
 def fit_summary(results_dir, lc_id, model):
-    """Return ``(logz, converged)`` for one fit, or ``None`` if absent.
+    """Return ``(logz, converged, ess)`` for one fit, or ``None`` if absent.
 
     ``converged`` defaults to True for legacy result files written before the
     flag existed -- those predate the multi-band models and never approached
     ``max_ncalls``, so treating them as converged preserves their behaviour.
+
+    ``ess`` defaults to np.inf for legacy result files written before the ess
+    key existed, so they always pass the ESS floor gate.
     """
     path = os.path.join(results_dir, f"{lc_id}_{model}.json")
     if not os.path.exists(path):
         return None
     with open(path) as f:
         d = json.load(f)
-    return d["logz"], bool(d.get("converged", True))
+    return d["logz"], bool(d.get("converged", True)), float(d.get("ess", np.inf))
 
 
 def meta_for(results_dir, lc_id):
@@ -102,7 +113,9 @@ def row_lookup(results_dir, ids, config_csv, group_cols):
     return rows
 
 
-def build_table(results_dir, group_cols=(), config_csv=None, keep_unconverged=False):
+def build_table(
+    results_dir, group_cols=(), config_csv=None, keep_unconverged=False, min_ess=200.0
+):
     """Aggregate ``<ID>_<model>.json`` FitResults into the summary table
     described in the module docstring. ``group_cols`` come from
     ``config_csv`` if given, else from each result's own ``meta`` (see
@@ -111,6 +124,11 @@ def build_table(results_dir, group_cols=(), config_csv=None, keep_unconverged=Fa
     Unless ``keep_unconverged``, pairs where either fit has
     ``converged: false`` are excluded; each cell reports ``n_dropped`` and
     ``converged_frac`` so the loss is always visible alongside the numbers.
+
+    Pairs where either fit has ESS below ``min_ess`` are also excluded,
+    even if both fits are marked converged; such fits truncated below
+    max_ncalls may have stopped on a likelihood blow-up with ESS=1 and
+    unreliable evidence.
     """
     ids = sorted(
         {
@@ -123,6 +141,8 @@ def build_table(results_dir, group_cols=(), config_csv=None, keep_unconverged=Fa
 
     per_cfg = defaultdict(lambda: defaultdict(list))
     dropped = defaultdict(lambda: defaultdict(int))
+    low_ess_pairs = defaultdict(lambda: defaultdict(int))
+    low_ess_excluded = defaultdict(lambda: defaultdict(list))
     for lc_id in ids:
         row = rows[lc_id]
         key = ", ".join(f"{c}={row[c]:g}" for c in group_cols if c in row) or "all"
@@ -131,24 +151,39 @@ def build_table(results_dir, group_cols=(), config_csv=None, keep_unconverged=Fa
             f1 = fit_summary(results_dir, lc_id, sine)
             if f0 is None or f1 is None:
                 continue
-            (z0, ok0), (z1, ok1) = f0, f1
+            (z0, ok0, e0), (z1, ok1, e1) = f0, f1
             if not (ok0 and ok1) and not keep_unconverged:
                 dropped[key][pair] += 1
                 continue
-            per_cfg[key][pair].append((z0 - z1) / np.log(10))
+            low = [
+                {"lc_id": lc_id, "model": m, "ess": e}
+                for m, e in ((base, e0), (sine, e1))
+                if e < min_ess
+            ]
+            if low:
+                low_ess_pairs[key][pair] += 1
+                low_ess_excluded[key][pair].extend(low)
+                continue
+            per_cfg[key][pair].append((lc_id, (z0 - z1) / np.log(10)))
 
     table = {}
-    for key in sorted(set(per_cfg) | set(dropped)):
+    for key in sorted(set(per_cfg) | set(dropped) | set(low_ess_pairs)):
         table[key] = {}
         for pair in PAIRS:
-            bfs = np.array(per_cfg[key].get(pair, []))
+            entries = per_cfg[key].get(pair, [])
+            ids_list = [lc_id for lc_id, _ in entries]
+            bfs = np.array([b for _, b in entries])
             n_drop = dropped[key][pair]
-            if not len(bfs) and not n_drop:
+            n_drop_ess = low_ess_pairs[key][pair]
+            if not len(bfs) and not n_drop and not n_drop_ess:
                 continue
-            total = len(bfs) + n_drop
+            total = len(bfs) + n_drop + n_drop_ess
             table[key][pair] = {
                 "n": len(bfs),
                 "n_dropped_unconverged": n_drop,
+                "n_dropped_low_ess": n_drop_ess,
+                "excluded": low_ess_excluded[key][pair],
+                "lc_ids": ids_list,
                 "converged_frac": round(len(bfs) / total, 3),
                 "log10_BF_mean": float(bfs.mean()) if len(bfs) else None,
                 "log10_BF_values": [round(float(b), 3) for b in bfs],
@@ -188,11 +223,26 @@ def main():
         "logz is not an evidence estimate and the resulting Bayes factors are "
         "biased towards 'refute' -- for diagnosis only, never for results",
     )
+    ap.add_argument(
+        "--min-ess",
+        type=float,
+        default=200.0,
+        help="drop any pair where either fit's posterior ESS falls below "
+        "this floor. A fit can be flagged converged and still have ESS=1 "
+        "(v2 lsst_single 310335_obpl stopped below max_ncalls on a "
+        "likelihood blow-up), and its logz is then not an evidence "
+        "estimate. 200 sits in the empty gap between the 4 bad v2 fits "
+        "(ESS=1) and the healthy population (1st percentile 1552).",
+    )
     args = ap.parse_args()
 
     group_cols = [c for c in args.group_cols.split(",") if c]
     table = build_table(
-        args.results_dir, group_cols, args.config_csv, args.keep_unconverged
+        args.results_dir,
+        group_cols,
+        args.config_csv,
+        args.keep_unconverged,
+        args.min_ess,
     )
 
     with open(args.out, "w") as f:
@@ -201,6 +251,7 @@ def main():
                 "table": table,
                 "thresholds": "log10B<-2 detect | +-2 inconclusive | >2 refute",
                 "unconverged_pairs": "included" if args.keep_unconverged else "dropped",
+                "min_ess": args.min_ess,
             },
             f,
             indent=1,
@@ -213,9 +264,13 @@ def main():
         )
 
     kept = sum(p["n"] for pairs in table.values() for p in pairs.values())
-    drop = sum(
+    drop_unconverged = sum(
         p["n_dropped_unconverged"] for pairs in table.values() for p in pairs.values()
     )
+    drop_ess = sum(
+        p["n_dropped_low_ess"] for pairs in table.values() for p in pairs.values()
+    )
+    drop_total = drop_unconverged + drop_ess
     for key, pairs in table.items():
         cells = []
         for pair in PAIRS:
@@ -224,20 +279,29 @@ def main():
                 o = p["outcomes"]
                 m = p["log10_BF_mean"]
                 mean = "  n/a " if m is None else f"{m:+.2f}"
+                n_total = p["n"] + p["n_dropped_unconverged"] + p["n_dropped_low_ess"]
                 cells.append(
                     f"{pair}: {mean} "
                     f"(d{o['detect']}/i{o['inconclusive']}/r{o['refute']}) "
-                    f"n={p['n']}/{p['n'] + p['n_dropped_unconverged']}"
+                    f"n={p['n']}/{n_total}"
                 )
         print(f"  {key:42s} " + " | ".join(cells))
 
-    if drop:
-        print(
-            f"\n  DROPPED {drop} of {kept + drop} pairs "
-            f"({100 * drop / (kept + drop):.1f}%) as unconverged (truncated by "
-            f"max_ncalls). Raise max_ncalls and refit -- a cell with few "
-            f"retained pairs cannot support a rate estimate."
+    if drop_total:
+        msg = f"\n  DROPPED {drop_total} of {kept + drop_total} pairs "
+        msg += f"({100 * drop_total / (kept + drop_total):.1f}%): "
+        msgs = []
+        if drop_unconverged:
+            msgs.append(f"{drop_unconverged} unconverged (truncated by max_ncalls)")
+        if drop_ess:
+            msgs.append(f"{drop_ess} below ESS floor ({args.min_ess})")
+        msg += " + ".join(msgs)
+        msg += (
+            ". Pairs must be trustworthy for their Bayes factor to mean "
+            "anything -- a cell with few retained pairs cannot support a "
+            "rate estimate."
         )
+        print(msg)
 
 
 if __name__ == "__main__":

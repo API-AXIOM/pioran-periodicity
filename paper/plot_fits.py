@@ -27,15 +27,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-import pioranpy as pa
 
 import pioran_periodicity as pp
-from pioran_periodicity.kernels import (  # noqa: E501
-    FrequencyBand,
-    drw_kernel,
-    obpl_kernel,
-)
 from pioran_periodicity.means import sine_mean
+from pioran_periodicity.predict import posterior_predictive
 
 N_GRID = 400
 N_DRAWS = 10
@@ -77,58 +72,6 @@ def load_fit(results_dir, source, model):
         return json.load(f)
 
 
-def build_kernel_and_mean(model_meta, params, band=None):
-    """Reconstruct the kernel and mean function for one parameter draw."""
-    noise = model_meta["noise"]
-    variant = model_meta["variant"]
-
-    if noise == "drw":
-        kernel = drw_kernel(params["log10_variance"], params["log10_fbend"])
-    elif noise == "obpl":
-        kernel = obpl_kernel(
-            params["log10_variance"],
-            params["alpha_low"],
-            params["log10_fbend"],
-            params["alpha_high"],
-            band,
-            n_components=model_meta["n_components"],
-            basis_function=model_meta["basis_function"],
-            check_density=False,
-        )
-    else:
-        raise ValueError(noise)
-
-    if "sine" in variant:
-
-        def mean_func(t, p=params):
-            return sine_mean(t, p["A1"], p["A2"], p["period"])
-
-    else:
-        mean_func = None
-    return kernel, mean_func
-
-
-def predict(kernel, mean_func, t, y, yerr, err_scale, t_grid, need_std=False):
-    """GP posterior-predictive mean (and, optionally, std) on t_grid.
-
-    ``need_std=False`` skips the O(N_grid^2) covariance-matrix computation
-    (only needed once, for the median curve's band).
-    """
-    sigma2 = (err_scale * yerr) ** 2
-    y_resid = y - (mean_func(t) if mean_func is not None else 0.0)
-    gp = pa.ScalableGP(0.0, kernel)
-    gp_cond = gp(t, sigma2)
-    fp = pa.posterior(gp_cond, y_resid)
-    fp_grid = fp(t_grid)
-    mu = np.asarray(pa.mean(fp_grid))
-    sd = None
-    if need_std:
-        sd = np.sqrt(np.diag(np.asarray(pa.cov(fp_grid))))
-    if mean_func is not None:
-        mu = mu + mean_func(t_grid)
-    return mu, sd
-
-
 def fit_curves(results_dir, source, model, t, y, yerr, rng):
     """Median curve (+-1 sigma) and N_DRAWS posterior-draw curves on a grid."""
     result = load_fit(results_dir, source, model)
@@ -137,26 +80,20 @@ def fit_curves(results_dir, source, model, t, y, yerr, rng):
     names = list(samples.keys())
     n_samples = len(samples[names[0]])
 
-    band = None
-    if meta.get("band") is not None:
-        band = FrequencyBand(**meta["band"])
-
     t_grid = np.linspace(t.min(), t.max(), N_GRID)
 
+    # err_scale is absent from every v2 result; posterior_predictive
+    # defaults it to 1.0 internally (pioran_periodicity/predict.py).
     median_params = {name: float(np.median(samples[name])) for name in names}
-    kernel, mean_func = build_kernel_and_mean(meta, median_params, band=band)
-    med_mu, med_sd = predict(
-        kernel, mean_func, t, y, yerr, median_params["err_scale"], t_grid, need_std=True
+    med_mu, med_sd = posterior_predictive(
+        meta, median_params, t, y, yerr, t_grid, need_std=True
     )
 
     idx = rng.choice(n_samples, size=N_DRAWS, replace=False)
     draw_curves = []
     for i in idx:
         p = {name: float(samples[name][i]) for name in names}
-        kernel_i, mean_func_i = build_kernel_and_mean(meta, p, band=band)
-        mu_i, _ = predict(
-            kernel_i, mean_func_i, t, y, yerr, p["err_scale"], t_grid, need_std=False
-        )
+        mu_i, _ = posterior_predictive(meta, p, t, y, yerr, t_grid, need_std=False)
         draw_curves.append(mu_i)
 
     # Sine coefficients were renamed A1/A2 -> A_cos/A_sin on 2026-09-03
