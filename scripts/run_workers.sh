@@ -42,6 +42,14 @@
 #                  than throwaway; needs h5py. Recommended for any run where
 #                  a single fit takes more than a few minutes.
 #
+#   LOG10_FBEND_MIN  run_sim.py --log10-fbend-min (default: unset ->
+#                  run_sim.py's DEFAULT_LOG10_FBEND_MIN of -2.25). MUST be
+#                  set per campaign: ZTF -2.0, LSST -2.25, synthetic -2.25.
+#                  A floor below log10(f_min/S_low) lets the sampler reach a
+#                  likelihood POLE where the basis expansion loses
+#                  positive-definiteness (|logZ| ~ 1e18, ESS = 1, and raising
+#                  MAX_NCALLS does not help). The same value must be used for
+#                  a cadence's null and signal runs.
 #   WATCHDOG       true/false, start scripts/watchdog.py alongside the
 #                  workers (default: true). The supervisor loop below only
 #                  restarts a worker that *exits*; it cannot see one that
@@ -78,6 +86,7 @@ CONDA_ENV="${CONDA_ENV:-pioran-periodicity}"
 MULTIBAND="${MULTIBAND:-false}"
 MAX_NCALLS="${MAX_NCALLS:-}"
 CHECKPOINT_DIR="${CHECKPOINT_DIR:-}"
+LOG10_FBEND_MIN="${LOG10_FBEND_MIN:-}"
 WATCHDOG="${WATCHDOG:-true}"
 WATCHDOG_STALL_MIN="${WATCHDOG_STALL_MIN:-45}"
 WATCHDOG_POLL="${WATCHDOG_POLL:-300}"
@@ -113,6 +122,7 @@ if [ $# -ge 4 ]; then
     [ "$MULTIBAND" = "true" ] && ARGS+=(--multiband)
     [ -n "$MAX_NCALLS" ] && ARGS+=(--max-ncalls "$MAX_NCALLS")
     [ -n "$CHECKPOINT_DIR" ] && ARGS+=(--checkpoint-dir "$CHECKPOINT_DIR")
+    [ -n "$LOG10_FBEND_MIN" ] && ARGS+=(--log10-fbend-min "$LOG10_FBEND_MIN")
     n=0
     while true; do
         # --no-capture-output: without it `conda run` BUFFERS the child's

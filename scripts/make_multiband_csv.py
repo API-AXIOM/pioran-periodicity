@@ -92,7 +92,7 @@ CSV_COLUMNS = [
 
 
 def build_rows(population, survey, first_id, seed, n_per_cell, period_max,
-               rep_start=0):
+               rep_start=0, bendfreq=None):
     """Rows for every (block, beta, highalpha, A1) cell, drawing
     ``n_per_cell`` objects independently in each one.
 
@@ -141,7 +141,8 @@ def build_rows(population, survey, first_id, seed, n_per_cell, period_max,
                 period_max=float(period_max),
                 band_amp_beta=beta,
                 block=block,
-                **FIXED_DEFAULTS,
+                **{**FIXED_DEFAULTS,
+                   **({} if bendfreq is None else {"bendfreq": bendfreq})},
             ))
             lc_id += 1
     return rows
@@ -171,6 +172,10 @@ def main():
     ap.add_argument("--min-baseline-years", type=float, default=None,
                     help="drop objects with a baseline shorter than this; "
                          "defaults to the scenario's period_max. 0 disables")
+    ap.add_argument("--bendfreq", type=float, default=None,
+                    help="PSD bend frequency in 1/DAY, stamped on every row; "
+                         "defaults to make_real_cadence_csv.FIXED_DEFAULTS "
+                         f"({FIXED_DEFAULTS['bendfreq']:.9f} = 0.35/yr)")
     ap.add_argument("--period-max", type=float, default=None,
                     help="sine period prior upper bound (yr), stamped on "
                          f"every row; defaults per survey to {P_MAX_BY_SURVEY}")
@@ -198,7 +203,7 @@ def main():
     )
     rows = build_rows(
         population, args.survey, id_start, args.seed, args.n_sims,
-        period_max, rep_start=args.rep_start,
+        period_max, rep_start=args.rep_start, bendfreq=args.bendfreq,
     )
     df = pd.DataFrame(rows).assign(units=MAGNITUDE_UNITS)[CSV_COLUMNS]
 

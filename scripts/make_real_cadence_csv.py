@@ -125,7 +125,11 @@ PERIOD_A1_DEFAULT = [
 
 FIXED_DEFAULTS = dict(
     lowalpha=-1.0,
-    bendfreq=0.005479452054794521,
+    # 0.35 /yr (per day), the campaign bend frequency decided 2026-09-06. This
+    # was 2/yr (0.005479452054794521) until 2026-09-25; the multiband nulls
+    # inherited that stale default because make_multiband_csv.py had no
+    # --bendfreq override. 1/yr and 2/yr give ZERO slope response.
+    bendfreq=0.000958904109589,
     # Pioran's SingleBendingPowerLaw is P(f) = (f/fb)^-a1 / (1 +
     # (f/fb)^(a2-a1)): sharpness is hard-wired to 1, with no free parameter.
     # Simulating at sharpness=10 put a knee in the data the fitted OBPL
